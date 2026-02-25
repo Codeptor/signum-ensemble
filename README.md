@@ -96,9 +96,48 @@ make backtest  # Walk-forward backtest with CPCV
 make dashboard # Launch Dash risk dashboard on :8050
 
 # Tests
-pytest tests/ -v       # Python (116 passed)
+pytest tests/ -v       # Python (122 passed)
 cargo test             # Rust (10 passed)
 cargo bench            # Criterion benchmarks
+
+## Live Trading Setup
+
+### 1. Alpaca Paper Trading (Free)
+```bash
+# Sign up at https://alpaca.markets
+# Get API keys from: https://app.alpaca.markets/paper/dashboard/overview
+export ALPACA_API_KEY="your_key"
+export ALPACA_API_SECRET="your_secret"
+
+# Install broker dependencies
+pip install alpaca-trade-api
+
+# Run paper trading example
+python examples/live_trading_example.py
+```
+
+### 2. Broker Factory Usage
+```python
+from python.brokers.factory import BrokerFactory
+
+# Create Alpaca paper trading instance
+broker = BrokerFactory.create("alpaca", paper_trading=True)
+broker.connect()
+
+# Get account info
+account = broker.get_account()
+print(f"Cash: ${account.cash:,.2f}")
+
+# Submit order
+from python.brokers.base import BrokerOrder
+order = BrokerOrder(symbol="AAPL", side="buy", qty=10, order_type="market")
+order_id = broker.submit_order(order)
+
+# List positions
+positions = broker.list_positions()
+for pos in positions:
+    print(f"{pos.symbol}: {pos.qty} shares")
+```
 ```
 
 ## Key Components
@@ -168,6 +207,13 @@ cargo bench            # Criterion benchmarks
 - Liquidity filter (exclude bottom 20% by dollar volume)
 - Multi-strategy comparison
 
+### Live Trading
+- **Alpaca Integration**: Paper and live trading via Alpaca Markets API
+- **Broker Abstraction**: Generic broker interface for multiple providers
+- **Position Synchronization**: Sync local state with broker positions
+- **Real-time Monitoring**: Live P&L and risk tracking
+- **Paper Trading**: Risk-free testing environment
+
 ### Monitoring
 - Feature drift detection (KS test + Population Stability Index)
 - Dash dashboard: KPI cards, cumulative returns, drawdown, rolling Sharpe, turnover, concentration gauge
@@ -182,6 +228,7 @@ cargo bench            # Criterion benchmarks
 | Risk | scipy, numpy |
 | Monitoring | Evidently-style drift (scipy), Dash + Plotly |
 | Execution | Rust, Criterion.rs |
+| Brokers | Alpaca Markets API |
 | MLOps | MLflow, DVC |
 | Infra | Docker Compose (TimescaleDB, Redis, MLflow) |
 
@@ -225,10 +272,17 @@ cargo bench            # Criterion benchmarks
 - **Paper trading**: Full simulation without real capital
 - **Portfolio reconciliation**: Automated rebalancing to target weights
 
+### Live Trading
+- **Alpaca Integration**: Paper and live trading support
+- **Broker Abstraction**: Generic interface for multiple brokers
+- **Position Sync**: Automatic reconciliation with broker
+- **Real-time Data**: Live market data and execution
+
 ### Test Coverage
-- **116 tests** (up from 20)
+- **122 tests** (up from 20)
 - 100% coverage of new risk metrics
 - Integration tests for risk checks and execution
 - Brinson attribution tests
+- Broker integration tests
 
-**Next Steps**: C extensions for large portfolios (500+ assets), live broker integration, options support.
+**Next Steps**: C extensions for large portfolios (500+ assets), Interactive Brokers integration, options support, real-time data streaming.
