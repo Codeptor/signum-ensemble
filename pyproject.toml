@@ -2,7 +2,7 @@
 name = "quant-platform"
 version = "0.1.0"
 description = "Quantitative equity platform: ML alpha, portfolio optimization, and execution"
-requires-python = ">=3.11"
+requires-python = ">=3.11, <3.12"
 dependencies = [
     "pandas>=2.0",
     "numpy>=1.24",
@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ml = [
-    "qlib>=0.9",
+    "pyqlib>=0.9",
     "pytorch-forecasting>=1.0",
     "torch>=2.1",
     "lightning>=2.1",

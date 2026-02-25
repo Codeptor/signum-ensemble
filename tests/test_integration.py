@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from python.alpha.features import compute_alpha_features, compute_forward_returns
+from python.alpha.features import (
+    compute_alpha_features,
+    compute_cross_sectional_features,
+    compute_forward_returns,
+    compute_residual_target,
+    merge_macro_features,
+)
 from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
 from python.bridge.bl_views import create_bl_views
@@ -41,15 +47,42 @@ def synthetic_universe():
     return pd.concat(ohlcv_frames), prices
 
 
-def test_full_pipeline(synthetic_universe):
+@pytest.fixture
+def mock_macro_file(synthetic_universe, tmp_path):
+    """Create a mock macro indicators parquet for testing."""
+    ohlcv, prices = synthetic_universe
+    dates = prices.index
+    macro = pd.DataFrame(
+        {
+            "vix": 18.0 + np.random.randn(len(dates)) * 3,
+            "us10y": 1.5 + np.random.randn(len(dates)) * 0.1,
+            "us3m": 0.05 + np.random.randn(len(dates)) * 0.01,
+        },
+        index=dates,
+    )
+    macro.index.name = "Date"
+    path = tmp_path / "macro_indicators.parquet"
+    macro.to_parquet(path)
+    return str(path)
+
+
+def test_full_pipeline(synthetic_universe, mock_macro_file):
     """Verify the complete signal -> portfolio -> risk pipeline works end-to-end."""
     ohlcv, prices = synthetic_universe
 
-    # 1. Feature engineering
+    # 1. Feature engineering (now includes cross-sectional + macro + residual target)
     features = compute_alpha_features(ohlcv)
+    features = compute_cross_sectional_features(features)
+    features = merge_macro_features(features, macro_path=mock_macro_file)
     labeled = compute_forward_returns(features, horizon=5)
+    labeled = compute_residual_target(labeled, horizon=5)
     labeled = labeled.dropna(subset=FEATURE_COLS + ["target_5d"])
     assert len(labeled) > 0
+
+    # Verify new features exist
+    assert "cs_ret_rank_5d" in labeled.columns
+    assert "vix" in labeled.columns
+    assert "raw_target_5d" in labeled.columns
 
     # 2. Train model
     model = CrossSectionalModel(model_type="lightgbm", feature_cols=FEATURE_COLS)

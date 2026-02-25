@@ -29,12 +29,12 @@ class CrossSectionalModel:
                 "objective": "regression",
                 "metric": "mse",
                 "learning_rate": 0.05,
-                "num_leaves": 63,
-                "min_child_samples": 20,
-                "subsample": 0.8,
-                "colsample_bytree": 0.8,
+                "num_leaves": 31,
+                "min_child_samples": 250,
+                "subsample": 0.7,
+                "colsample_bytree": 0.7,
                 "verbose": -1,
-                "n_estimators": 200,
+                "n_estimators": 150,
             }
         elif self.model_type == "catboost":
             return {

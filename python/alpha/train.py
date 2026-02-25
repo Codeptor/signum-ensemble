@@ -5,19 +5,27 @@ import logging
 import mlflow
 import pandas as pd
 
-from python.alpha.features import compute_alpha_features, compute_forward_returns
+from python.alpha.features import (
+    compute_alpha_features,
+    compute_cross_sectional_features,
+    compute_forward_returns,
+    compute_residual_target,
+    merge_macro_features,
+)
 from python.alpha.model import CrossSectionalModel
 from python.data.ingestion import reshape_ohlcv_wide_to_long
 
 logger = logging.getLogger(__name__)
 
 FEATURE_COLS = [
-    "ret_1d", "ret_5d", "ret_10d", "ret_20d",
+    "ret_5d", "ret_10d", "ret_20d",
     "ma_ratio_5", "ma_ratio_10", "ma_ratio_20", "ma_ratio_60",
     "vol_5d", "vol_10d", "vol_20d",
     "rsi_14", "macd", "macd_signal",
-    "bb_position", "volume_ratio", "hl_range", "oc_range",
+    "bb_position", "volume_ratio", "hl_range",
     "dollar_volume_20d", "amihud_illiq", "bid_ask_proxy",
+    # Cross-sectional features
+    "cs_ret_rank_5d", "cs_ret_rank_20d", "cs_vol_rank_20d", "cs_volume_rank",
 ]
 
 
@@ -26,7 +34,10 @@ def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet"):
     raw = pd.read_parquet(data_path)
     raw = reshape_ohlcv_wide_to_long(raw)
     featured = compute_alpha_features(raw)
+    featured = compute_cross_sectional_features(featured)
+    featured = merge_macro_features(featured)
     labeled = compute_forward_returns(featured, horizon=5)
+    labeled = compute_residual_target(labeled, horizon=5)
     labeled = labeled.dropna(subset=FEATURE_COLS + ["target_5d"])
 
     # Time-based split: last 20% for validation

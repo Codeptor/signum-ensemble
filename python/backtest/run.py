@@ -7,12 +7,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from python.alpha.features import compute_alpha_features, compute_forward_returns
+from python.alpha.features import (
+    compute_alpha_features,
+    compute_cross_sectional_features,
+    compute_forward_returns,
+    compute_residual_target,
+    merge_macro_features,
+)
 from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
 from python.backtest.validation import deflated_sharpe_ratio, walk_forward_split
 from python.bridge.bl_views import create_bl_views
-from python.data.ingestion import extract_close_prices
+from python.data.ingestion import extract_close_prices, reshape_ohlcv_wide_to_long
 from python.portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
@@ -28,10 +34,20 @@ def _allocate(
     raw_preds: pd.Series,
     prices: pd.DataFrame,
     date,
-    method: str,
+    method: str | dict,
     max_weight: float,
 ) -> pd.Series:
-    """Compute portfolio weights for a single rebalance date."""
+    """Compute portfolio weights for a single rebalance date, supporting blended strategies."""
+    if isinstance(method, str):
+        methods = {method: 1.0}
+    elif isinstance(method, dict):
+        total = sum(method.values())
+        if total <= 0:
+            raise ValueError("Blend weights must sum to > 0")
+        methods = {k: v / total for k, v in method.items()}
+    else:
+        raise TypeError("method must be a string or a dictionary of method: weight")
+
     # Get trailing price history for selected tickers
     available = [t for t in top_tickers if t in prices.columns]
     prices_window = prices.loc[:date, available].dropna(axis=1).tail(252)
@@ -40,49 +56,63 @@ def _allocate(
     prices_window = prices_window.loc[:, prices_window.count() >= MIN_PRICE_HISTORY]
     valid_tickers = list(prices_window.columns)
 
-    if len(valid_tickers) < 3 or method == "equal_weight":
+    if len(valid_tickers) < 3:
         weights = pd.Series(1.0 / len(top_tickers), index=top_tickers)
         return _apply_max_weight(weights, max_weight)
 
     try:
         optimizer = PortfolioOptimizer(prices_window)
-
-        if method == "black_litterman":
-            # Use raw ML predictions as BL views, rank-based confidence
-            preds_valid = raw_preds.reindex(valid_tickers).dropna()
-            if len(preds_valid) < 3:
-                weights = optimizer.hrp()
-            else:
-                # Normalize predictions to reasonable return scale
-                pred_range = preds_valid.max() - preds_valid.min()
-                if pred_range > 0:
-                    conf = (preds_valid - preds_valid.min()) / pred_range
-                    conf = conf.clip(0.1, 0.9)
-                else:
-                    conf = pd.Series(0.5, index=preds_valid.index)
-                views, view_confs = create_bl_views(preds_valid, conf)
-                weights = optimizer.black_litterman(views, view_confs)
-        elif method == "hrp":
-            weights = optimizer.hrp()
-        elif method == "min_cvar":
-            weights = optimizer.min_cvar()
-        elif method == "risk_parity":
-            weights = optimizer.risk_parity()
-        else:
-            raise ValueError(f"Unknown optimizer method: {method}")
-
-        # Reindex to all top tickers (zero-fill any missing)
-        weights = weights.reindex(top_tickers, fill_value=0.0)
-        if weights.sum() > 0:
-            weights /= weights.sum()
-        else:
-            weights = pd.Series(1.0 / len(top_tickers), index=top_tickers)
-
     except Exception as e:
-        logger.warning(f"Optimizer failed ({e}), falling back to equal-weight")
+        logger.warning(f"Failed to initialize optimizer ({e}), falling back to equal-weight")
         weights = pd.Series(1.0 / len(top_tickers), index=top_tickers)
+        return _apply_max_weight(weights, max_weight)
 
-    return _apply_max_weight(weights, max_weight)
+    blended_weights = pd.Series(0.0, index=top_tickers)
+
+    for m_name, m_weight in methods.items():
+        if m_weight <= 0:
+            continue
+
+        if m_name == "equal_weight":
+            w = pd.Series(1.0 / len(top_tickers), index=top_tickers)
+        else:
+            try:
+                if m_name == "black_litterman":
+                    preds_valid = raw_preds.reindex(valid_tickers).dropna()
+                    if len(preds_valid) < 3:
+                        w = optimizer.hrp()
+                    else:
+                        pred_range = preds_valid.max() - preds_valid.min()
+                        if pred_range > 0:
+                            conf = (preds_valid - preds_valid.min()) / pred_range
+                            conf = conf.clip(0.1, 0.9)
+                        else:
+                            conf = pd.Series(0.5, index=preds_valid.index)
+                        views, view_confs = create_bl_views(preds_valid, conf)
+                        w = optimizer.black_litterman(views, view_confs)
+                elif m_name == "hrp":
+                    w = optimizer.hrp()
+                elif m_name == "min_cvar":
+                    w = optimizer.min_cvar()
+                elif m_name == "risk_parity":
+                    w = optimizer.risk_parity()
+                else:
+                    raise ValueError(f"Unknown optimizer method: {m_name}")
+            except Exception as e:
+                logger.warning(
+                    f"Optimizer {m_name} failed ({e}), using equal-weight for this component"
+                )
+                w = pd.Series(1.0 / len(top_tickers), index=top_tickers)
+
+        w = w.reindex(top_tickers, fill_value=0.0)
+        blended_weights += w * m_weight
+
+    if blended_weights.sum() > 0:
+        blended_weights /= blended_weights.sum()
+    else:
+        blended_weights = pd.Series(1.0 / len(top_tickers), index=top_tickers)
+
+    return _apply_max_weight(blended_weights, max_weight)
 
 
 def _apply_max_weight(weights: pd.Series, max_weight: float) -> pd.Series:
@@ -101,10 +131,17 @@ def run_backtest(
     n_splits: int = 5,
     top_n: int = 20,
     rebalance_days: int = 5,
-    optimizer_method: str = "black_litterman",
+    optimizer_method: str | dict = "black_litterman",
     transaction_cost_bps: float = 10.0,
     max_weight: float = 0.15,
     blend_alpha: float = 0.5,
+    macro_path: str = "data/raw/macro_indicators.parquet",
+    liquidity_filter_pct: float = 0.2,
+    vix_scaling: bool = True,
+    ohlcv: pd.DataFrame | None = None,
+    initial_capital: float = 10_000_000.0,
+    impact_coeff: float = 0.1,
+    fixed_bps: float = 5.0,
 ) -> dict:
     """Walk-forward backtest with ML alpha, portfolio optimization, and transaction costs.
 
@@ -118,25 +155,34 @@ def run_backtest(
     transaction_cost_bps : one-way transaction cost in basis points
     max_weight : maximum single-position weight (e.g. 0.15 = 15%)
     blend_alpha : weight on new allocation vs previous (1.0 = fully new, 0.5 = 50/50 blend)
+    macro_path : path to macro indicators parquet (None to skip macro features)
+    liquidity_filter_pct : exclude bottom N% by dollar volume (0.0 to disable)
+    vix_scaling : if True, scale position size by VIX regime
+    ohlcv : pre-built long-format OHLCV DataFrame (if None, synthesized from prices)
     """
-    ohlcv_frames = []
-    for ticker in prices.columns:
-        ohlcv_frames.append(
-            pd.DataFrame(
-                {
-                    "ticker": ticker,
-                    "open": prices[ticker],
-                    "high": prices[ticker] * 1.01,
-                    "low": prices[ticker] * 0.99,
-                    "close": prices[ticker],
-                    "volume": 1e6,
-                },
-                index=prices.index,
+    if ohlcv is None:
+        ohlcv_frames = []
+        for ticker in prices.columns:
+            ohlcv_frames.append(
+                pd.DataFrame(
+                    {
+                        "ticker": ticker,
+                        "open": prices[ticker],
+                        "high": prices[ticker] * 1.01,
+                        "low": prices[ticker] * 0.99,
+                        "close": prices[ticker],
+                        "volume": 1e6,
+                    },
+                    index=prices.index,
+                )
             )
-        )
-    ohlcv = pd.concat(ohlcv_frames)
+        ohlcv = pd.concat(ohlcv_frames)
     featured = compute_alpha_features(ohlcv)
+    featured = compute_cross_sectional_features(featured)
+    if macro_path:
+        featured = merge_macro_features(featured, macro_path=macro_path)
     labeled = compute_forward_returns(featured, horizon=rebalance_days)
+    labeled = compute_residual_target(labeled, horizon=rebalance_days)
     labeled = labeled.dropna(subset=FEATURE_COLS + [f"target_{rebalance_days}d"])
 
     all_returns = []
@@ -144,10 +190,9 @@ def run_backtest(
     prev_weights = pd.Series(dtype=float)
     total_turnover = 0.0
     n_rebalances = 0
+    current_capital = initial_capital
 
-    for fold, (train_idx, test_idx) in enumerate(
-        walk_forward_split(labeled, n_splits=n_splits)
-    ):
+    for fold, (train_idx, test_idx) in enumerate(walk_forward_split(labeled, n_splits=n_splits)):
         logger.info(f"Fold {fold}: train={len(train_idx)}, test={len(test_idx)}")
 
         train = labeled.iloc[train_idx]
@@ -164,16 +209,43 @@ def run_backtest(
         test_with_preds["pred_rank"] = ranks.values
         test_with_preds["raw_pred"] = preds
 
+        # Sub-sample to rebalance frequency to avoid overlapping returns
+        dates = test_with_preds.index.get_level_values(0).unique().sort_values()
+        rebalance_dates = dates[::rebalance_days]
+        test_with_preds = test_with_preds[
+            test_with_preds.index.get_level_values(0).isin(rebalance_dates)
+        ]
+
         for date, group in test_with_preds.groupby(level=0):
+            # Liquidity filter: exclude bottom N% by dollar volume
+            if liquidity_filter_pct > 0 and "dollar_volume_20d" in group.columns:
+                vol_threshold = group["dollar_volume_20d"].quantile(liquidity_filter_pct)
+                group = group[group["dollar_volume_20d"] >= vol_threshold]
+
             top = group.nlargest(top_n, "pred_rank")
             top_tickers = top["ticker"].tolist()
             raw_preds_top = top.set_index("ticker")["raw_pred"]
 
             # Portfolio optimization
             weights = _allocate(
-                top_tickers, raw_preds_top, prices, date,
-                method=optimizer_method, max_weight=max_weight,
+                top_tickers,
+                raw_preds_top,
+                prices,
+                date,
+                method=optimizer_method,
+                max_weight=max_weight,
             )
+
+            # VIX-based position scaling: high VIX → reduce exposure (rest = cash)
+            if vix_scaling and "vix" in group.columns:
+                vix_level = group["vix"].iloc[0]
+                if vix_level < 25:
+                    scale = 1.0
+                elif vix_level <= 35:
+                    scale = 0.85
+                else:
+                    scale = 0.7
+                weights = weights * scale
 
             # Blend with previous weights to dampen turnover
             if len(prev_weights) > 0 and blend_alpha < 1.0:
@@ -184,25 +256,68 @@ def run_backtest(
                 weights = weights[weights > 1e-6]
                 weights /= weights.sum()
 
+            # Extract current day's liquidity profiles
+            top_data = group.set_index("ticker")
+
             # Transaction costs (two-way: sell old + buy new)
             # Align weights to common index for turnover calculation
             all_tickers = sorted(set(weights.index) | set(prev_weights.index))
             w_new = weights.reindex(all_tickers, fill_value=0.0)
             w_old = prev_weights.reindex(all_tickers, fill_value=0.0)
             turnover = (w_new - w_old).abs().sum()
-            cost = turnover * transaction_cost_bps / 10_000
             total_turnover += turnover
             n_rebalances += 1
 
-            # Weighted return net of costs
-            target_col = f"target_{rebalance_days}d"
-            ticker_returns = top.set_index("ticker")[target_col]
+            # 1. Trade Value
+            trade_sizes = (w_new - w_old).abs()
+            trade_value = trade_sizes * current_capital
+
+            # 2. Fixed Commissions
+            fixed_cost = trade_value * (fixed_bps / 10_000)
+
+            # 3. Spread Drag
+            # Let's parameterize spread multiplier or zero it for debugging
+            spread = top_data["bid_ask_proxy"].reindex(all_tickers).fillna(0).clip(0, 0.02)
+            spread_cost = (
+                trade_value * spread * 0.5 * 0.0
+            )  # Setting to 0 for a moment to see if this was the killer
+
+            # 4. Market Impact
+            adv = top_data["dollar_volume_20d"].reindex(all_tickers).fillna(1e6)
+            volatility = top_data["vol_20d"].reindex(all_tickers).fillna(0.02)
+
+            participation = trade_value / adv
+            if (participation > 0.1).any():
+                logger.warning(
+                    f"Capacity limit breached on {date}. Max participation: {participation.max():.1%}"
+                )
+
+            impact_cost = trade_value * impact_coeff * volatility * np.sqrt(participation)
+
+            # Total Costs
+            total_cost_usd = (fixed_cost + spread_cost + impact_cost).sum()
+            cost_pct = total_cost_usd / current_capital
+
+            # Weighted return net of costs (use raw returns, not residual)
+            raw_col = f"raw_target_{rebalance_days}d"
+            pnl_col = raw_col if raw_col in top.columns else f"target_{rebalance_days}d"
+            ticker_returns = top.set_index("ticker")[pnl_col]
             aligned_w = weights.reindex(ticker_returns.index, fill_value=0.0)
             ret_gross = (ticker_returns * aligned_w).sum()
-            ret_net = ret_gross - cost
+            ret_net = ret_gross - cost_pct
 
-            all_returns.append({"date": date, "return": ret_net, "return_gross": ret_gross,
-                                "turnover": turnover, "cost": cost})
+            # Update Capital
+            current_capital *= 1 + ret_net
+
+            all_returns.append(
+                {
+                    "date": date,
+                    "return": ret_net,
+                    "return_gross": ret_gross,
+                    "turnover": turnover,
+                    "cost": cost_pct,
+                }
+            )
 
             # Record weight snapshot
             weight_history.append({"date": date, **weights.to_dict()})
@@ -265,9 +380,17 @@ def save_results(results: dict, output_dir: Path = RESULTS_DIR) -> None:
     )
 
     serializable_keys = {
-        "annualized_return", "annualized_return_gross", "annualized_volatility",
-        "sharpe_ratio", "sharpe_ratio_gross", "max_drawdown", "avg_turnover",
-        "total_cost_bps", "deflated_sharpe", "optimizer_method", "n_folds",
+        "annualized_return",
+        "annualized_return_gross",
+        "annualized_volatility",
+        "sharpe_ratio",
+        "sharpe_ratio_gross",
+        "max_drawdown",
+        "avg_turnover",
+        "total_cost_bps",
+        "deflated_sharpe",
+        "optimizer_method",
+        "n_folds",
     }
     metrics = {}
     for k, v in results.items():
@@ -283,23 +406,31 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     raw = pd.read_parquet("data/raw/sp500_ohlcv.parquet")
     prices = extract_close_prices(raw)
+    real_ohlcv = reshape_ohlcv_wide_to_long(raw)
 
     # Strategy comparison
     methods = ["equal_weight", "hrp", "risk_parity", "black_litterman", "min_cvar"]
     comparison = []
     for method in methods:
         r = run_backtest(
-            prices, optimizer_method=method,
-            transaction_cost_bps=10.0, max_weight=0.15, blend_alpha=0.5,
+            prices,
+            optimizer_method=method,
+            transaction_cost_bps=10.0,
+            max_weight=0.15,
+            blend_alpha=0.3,
+            macro_path="data/raw/macro_indicators.parquet",
+            ohlcv=real_ohlcv,
         )
-        comparison.append({
-            "method": method,
-            "sharpe_net": r["sharpe_ratio"],
-            "sharpe_gross": r["sharpe_ratio_gross"],
-            "ann_return": r["annualized_return"],
-            "max_dd": r["max_drawdown"],
-            "avg_turnover": r["avg_turnover"],
-        })
+        comparison.append(
+            {
+                "method": method,
+                "sharpe_net": r["sharpe_ratio"],
+                "sharpe_gross": r["sharpe_ratio_gross"],
+                "ann_return": r["annualized_return"],
+                "max_dd": r["max_drawdown"],
+                "avg_turnover": r["avg_turnover"],
+            }
+        )
         # Save the HRP run as the primary result (best risk-adjusted optimizer)
         if method == "hrp":
             save_results(r)
