@@ -289,7 +289,8 @@ def run_backtest(
             participation = trade_value / adv
             if (participation > 0.1).any():
                 logger.warning(
-                    f"Capacity limit breached on {date}. Max participation: {participation.max():.1%}"
+                    f"Capacity limit breached on {date}. "
+                    f"Max participation: {participation.max():.1%}"
                 )
 
             impact_cost = trade_value * impact_coeff * volatility * np.sqrt(participation)

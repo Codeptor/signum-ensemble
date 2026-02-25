@@ -4,7 +4,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 logger = logging.getLogger(__name__)
 
@@ -141,24 +140,29 @@ def run_robustness_analysis(returns_file: Path = RESULTS_DIR / "backtest_returns
     # Print summary
     logger.info("\n=== Robustness Report ===")
     logger.info(
-        f"Full Period Sharpe: {full_metrics['sharpe_ratio']:.3f} | Max DD: {full_metrics['max_drawdown']:.2%}"
+        f"Full Period Sharpe: {full_metrics['sharpe_ratio']:.3f} | "
+        f"Max DD: {full_metrics['max_drawdown']:.2%}"
     )
     logger.info("\nMonte Carlo Resampling (90% Confidence Interval):")
     logger.info(
-        f"  Sharpe Ratio: [{mc_results['sharpe_ratio']['5th_percentile']:.3f}, {mc_results['sharpe_ratio']['95th_percentile']:.3f}]"
+        f"  Sharpe Ratio: [{mc_results['sharpe_ratio']['5th_percentile']:.3f}, "
+        f"{mc_results['sharpe_ratio']['95th_percentile']:.3f}]"
     )
     logger.info(
-        f"  Ann Return:   [{mc_results['ann_return']['5th_percentile']:.2%}, {mc_results['ann_return']['95th_percentile']:.2%}]"
+        f"  Ann Return:   [{mc_results['ann_return']['5th_percentile']:.2%}, "
+        f"{mc_results['ann_return']['95th_percentile']:.2%}]"
     )
     logger.info(
-        f"  Max Drawdown: [{mc_results['max_drawdown']['5th_percentile']:.2%}, {mc_results['max_drawdown']['95th_percentile']:.2%}]"
+        f"  Max Drawdown: [{mc_results['max_drawdown']['5th_percentile']:.2%}, "
+        f"{mc_results['max_drawdown']['95th_percentile']:.2%}]"
     )
 
     logger.info("\nRegime Stress Tests (Sharpe / Return / MaxDD):")
     for regime, metrics in regime_results.items():
         if metrics:
             logger.info(
-                f"  {regime:22}: {metrics['sharpe_ratio']:>5.2f} / {metrics['ann_return']:>6.2%} / {metrics['max_drawdown']:>6.2%}"
+                f"  {regime:22}: {metrics['sharpe_ratio']:>5.2f} / "
+                f"{metrics['ann_return']:>6.2%} / {metrics['max_drawdown']:>6.2%}"
             )
         else:
             logger.info(f"  {regime:22}: Insufficient data")
