@@ -96,7 +96,7 @@ make backtest  # Walk-forward backtest with CPCV
 make dashboard # Launch Dash risk dashboard on :8050
 
 # Tests
-pytest tests/ -v       # Python (37 passed)
+pytest tests/ -v       # Python (116 passed)
 cargo test             # Rust (10 passed)
 cargo bench            # Criterion benchmarks
 ```
@@ -142,6 +142,14 @@ cargo bench            # Criterion benchmarks
 - **Real-time Risk Checks**: Position size limits, daily trade limits
 - **Risk/Reward Validation**: Minimum 2:1 ratio enforcement
 - **Portfolio Monitoring**: VaR, drawdown, Sharpe checks
+- **Position Sizing**: Kelly criterion, risk-based, volatility-adjusted sizing
+
+### Execution Bridge
+- **Order Validation**: Risk manager checks before execution
+- **Position Tracking**: Real-time position and P&L monitoring
+- **Paper Trading**: Simulate live trading without real capital
+- **Portfolio Rebalancing**: Automated target weight reconciliation
+- **Equity Curve**: Track performance over time
 - **Position Sizing**: Kelly criterion, risk-based, volatility-adjusted sizing
 
 ### Rust Matching Engine
@@ -206,9 +214,21 @@ cargo bench            # Criterion benchmarks
 - **Risk/Reward validation** (2:1 minimum)
 - **Automated stop-losses** and limits
 
-### Test Coverage
-- **37 tests** (up from 20)
-- 100% coverage of new risk metrics
-- Integration tests for risk checks
+### Performance Attribution
+- **Brinson-Fachler model**: Allocation, selection, and interaction effects
+- **Sector-level decomposition**: Track where alpha comes from
+- **Attribution reports**: Formatted analysis of performance drivers
 
-**Next Steps**: Live trading execution bridge, performance attribution (Brinson model), C extensions for large portfolios (500+ assets).
+### Execution Bridge
+- **Order management**: Submit and track orders with risk validation
+- **Position tracking**: Real-time P&L monitoring
+- **Paper trading**: Full simulation without real capital
+- **Portfolio reconciliation**: Automated rebalancing to target weights
+
+### Test Coverage
+- **116 tests** (up from 20)
+- 100% coverage of new risk metrics
+- Integration tests for risk checks and execution
+- Brinson attribution tests
+
+**Next Steps**: C extensions for large portfolios (500+ assets), live broker integration, options support.
