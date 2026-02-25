@@ -7,11 +7,11 @@ End-to-end quantitative equity platform: ML alpha generation, portfolio optimiza
 ## Architecture
 
 ```
-ML Signals ──► Black-Litterman Bridge ──► Portfolio Optimizer ──► Risk Engine
-    │                                            │
-    ▼                                            ▼
-LightGBM (Alpha158)                    HRP / CVaR / BL
-TFT (PyTorch)                         skfolio + cvxpy
+ML Signals ──► Black-Litterman Bridge ──► Portfolio Optimizer ──► Risk Engine ──► Risk Manager
+    │                                            │                           │
+    ▼                                            ▼                           ▼
+LightGBM (Alpha158)                    HRP / CVaR / BL              Position Sizing
+TFT (PyTorch)                         Risk Parity                   Real-time Checks
     │
     ▼
 Drift Detection (KS + PSI) ──► Dash Dashboard
@@ -65,7 +65,7 @@ Key insight: macro features (VIX, term spread) had the highest tree-split import
 quant-platform/
 ├── python/
 │   ├── alpha/           # ML signal generation (LightGBM, TFT)
-│   ├── portfolio/       # HRP, CVaR, Black-Litterman optimizer + risk engine
+│   ├── portfolio/       # HRP, CVaR, Black-Litterman, risk engine + attribution
 │   ├── data/            # yfinance ingestion + TimescaleDB storage
 │   ├── backtest/        # Walk-forward CPCV + deflated Sharpe ratio
 │   ├── monitoring/      # Drift detection + Dash dashboard
@@ -96,7 +96,7 @@ make backtest  # Walk-forward backtest with CPCV
 make dashboard # Launch Dash risk dashboard on :8050
 
 # Tests
-pytest tests/ -v       # Python (20 passed)
+pytest tests/ -v       # Python (37 passed)
 cargo test             # Rust (10 passed)
 cargo bench            # Criterion benchmarks
 ```
@@ -116,11 +116,33 @@ cargo bench            # Criterion benchmarks
 - **Black-Litterman with ML views** — ML confidence scores mapped to view uncertainties
 
 ### Risk Engine
-- VaR (parametric + historical simulation)
-- CVaR / Expected Shortfall
-- Maximum drawdown tracking
-- Rolling Sharpe ratio (60-day window)
-- Herfindahl-Hirschman concentration index
+- **VaR**: Parametric, Historical, and Cornish-Fisher (accounts for skewness & kurtosis)
+- **CVaR / Expected Shortfall**: Historical simulation
+- **Drawdown Analysis**: Max, average, duration statistics
+- **Risk-Adjusted Returns**: Sharpe, Sortino, Calmar, and Omega ratios
+- **Rolling Metrics**: 63-day rolling Sharpe, VaR, max drawdown, beta
+- **Volatility Regime Detection**: Low/normal/high classification
+- **Information Ratio**: Alpha per unit tracking error vs benchmark
+- **Herfindahl-Hirschman concentration index**
+
+### Risk Attribution
+- **Marginal Risk Contribution (MRC)**: Risk added per unit weight
+- **Component Risk**: Actual contribution to portfolio volatility
+- **Risk Parity Optimization**: True equal risk contribution
+- **Diversification Ratio**: Weighted avg vol / portfolio vol
+- **Stress Correlation**: Correlation breakdown during drawdowns
+
+### Stress Testing
+- **Historical Scenarios**: 2008 crisis, 2020 COVID, 2022 hikes, dot-com bust, flash crash
+- **Hypothetical Shocks**: "What if Tech drops 20%?" scenario analysis
+- **Monte Carlo Stress**: Elevated volatility simulations (1.5x, 2.5x, 3x)
+- **Correlation Breakdown**: How correlations spike during stress periods
+
+### Risk Manager
+- **Real-time Risk Checks**: Position size limits, daily trade limits
+- **Risk/Reward Validation**: Minimum 2:1 ratio enforcement
+- **Portfolio Monitoring**: VaR, drawdown, Sharpe checks
+- **Position Sizing**: Kelly criterion, risk-based, volatility-adjusted sizing
 
 ### Rust Matching Engine
 - `BTreeMap<Price, VecDeque<Order>>` for bid/ask levels
@@ -154,3 +176,39 @@ cargo bench            # Criterion benchmarks
 | Execution | Rust, Criterion.rs |
 | MLOps | MLflow, DVC |
 | Infra | Docker Compose (TimescaleDB, Redis, MLflow) |
+
+---
+
+## Recent Improvements (February 2026)
+
+### Enhanced Risk Analytics
+- **15 new risk metrics** including Sortino, Calmar, Omega, Information Ratio
+- **Cornish-Fisher VaR** for fat-tailed distributions
+- **Rolling risk metrics** (63-day windows) for dynamic monitoring
+- **Volatility regime detection** for adaptive strategies
+
+### Risk Attribution System
+- **Marginal Risk Contribution** analysis
+- **Component risk breakdown** per asset
+- **True Risk Parity** optimization (vs HRP)
+- **Diversification ratio** tracking
+- **Stress correlation** analysis
+
+### Advanced Stress Testing
+- **Historical scenarios**: 2008 crisis, COVID crash, rate hikes
+- **Hypothetical shocks**: Custom scenario modeling
+- **Monte Carlo stress** with elevated volatility
+- **Correlation breakdown** during stress periods
+
+### Risk Manager Integration
+- **Real-time risk checks** in backtest loop
+- **Position sizing** with Kelly criterion
+- **Risk/Reward validation** (2:1 minimum)
+- **Automated stop-losses** and limits
+
+### Test Coverage
+- **37 tests** (up from 20)
+- 100% coverage of new risk metrics
+- Integration tests for risk checks
+
+**Next Steps**: Live trading execution bridge, performance attribution (Brinson model), C extensions for large portfolios (500+ assets).
