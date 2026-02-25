@@ -1,5 +1,7 @@
 """Risk metrics: VaR, CVaR, drawdown, concentration, and advanced risk measures."""
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -13,7 +15,7 @@ class RiskEngine:
         returns: pd.DataFrame,
         weights: pd.Series,
         rf_rate: float = 0.02,
-        benchmark_returns: pd.Series = None,
+        benchmark_returns: Optional[pd.Series] = None,
     ):
         """
         Args:
@@ -37,7 +39,7 @@ class RiskEngine:
         """Parametric VaR assuming normal distribution."""
         mu = self.portfolio_returns.mean()
         sigma = self.portfolio_returns.std()
-        return stats.norm.ppf(1 - confidence, mu, sigma)
+        return float(stats.norm.ppf(1 - confidence, mu, sigma))
 
     def var_historical(self, confidence: float = 0.95) -> float:
         """Historical simulation VaR."""
@@ -48,14 +50,14 @@ class RiskEngine:
         VaR with Cornish-Fisher expansion for non-normality.
         Accounts for skewness and kurtosis (fat tails).
         """
-        z = stats.norm.ppf(confidence)
-        s = stats.skew(self.portfolio_returns)  # Skewness
-        k = stats.kurtosis(self.portfolio_returns)  # Excess kurtosis
+        z = float(stats.norm.ppf(confidence))
+        s = float(stats.skew(self.portfolio_returns))  # Skewness
+        k = float(stats.kurtosis(self.portfolio_returns))  # Excess kurtosis
 
         # Cornish-Fisher expansion
         z_cf = z + (z**2 - 1) * s / 6 + (z**3 - 3 * z) * k / 24 - (2 * z**3 - 5 * z) * s**2 / 36
 
-        return -(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std())
+        return float(-(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std()))
 
     def cvar_historical(self, confidence: float = 0.95) -> float:
         """Conditional VaR (Expected Shortfall) via historical simulation."""
@@ -84,7 +86,7 @@ class RiskEngine:
             dd *= np.sqrt(self.ann_factor)
         return dd
 
-    def beta(self, market_returns: pd.Series = None) -> float:
+    def beta(self, market_returns: Optional[pd.Series] = None) -> float:
         """Beta relative to market or benchmark."""
         if market_returns is None:
             market_returns = self.benchmark_returns
@@ -116,7 +118,7 @@ class RiskEngine:
     def avg_drawdown(self) -> float:
         """Average drawdown (excluding zeros)."""
         dd = self.drawdowns()
-        return dd[dd < 0].mean() if (dd < 0).any() else 0.0
+        return float(dd[dd < 0].mean()) if (dd < 0).any() else 0.0
 
     def drawdown_duration(self) -> dict:
         """Drawdown duration statistics."""
@@ -184,7 +186,7 @@ class RiskEngine:
 
         return returns_above.sum() / returns_below.sum()
 
-    def information_ratio(self, benchmark_returns: pd.Series = None) -> float:
+    def information_ratio(self, benchmark_returns: Optional[pd.Series] = None) -> float:
         """Information ratio vs benchmark (alpha per unit tracking error)."""
         if benchmark_returns is None:
             benchmark_returns = self.benchmark_returns
@@ -202,7 +204,7 @@ class RiskEngine:
     # Rolling Metrics
     # =========================================================================
 
-    def rolling_sharpe(self, window: int = 63, risk_free: float = None) -> pd.Series:
+    def rolling_sharpe(self, window: int = 63, risk_free: Optional[float] = None) -> pd.Series:
         """Rolling Sharpe ratio (default: 63 days = ~3 months)."""
         if risk_free is None:
             risk_free = self.rf_rate
@@ -326,8 +328,8 @@ class RiskEngine:
             "hhi": self.concentration()["hhi"],
             "effective_n": self.concentration()["effective_n"],
             # Distribution Statistics
-            "skewness": stats.skew(self.portfolio_returns),
-            "kurtosis": stats.kurtosis(self.portfolio_returns),
+            "skewness": float(stats.skew(self.portfolio_returns)),
+            "kurtosis": float(stats.kurtosis(self.portfolio_returns)),
         }
 
         # Add Information Ratio if benchmark available
