@@ -4,8 +4,10 @@ This module is the glue between the ML model and the live trading bot.
 It handles the full pipeline from raw OHLCV data to target portfolio weights.
 """
 
+import hashlib
+import json
 import logging
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import joblib
@@ -36,6 +38,9 @@ TRAINING_LOOKBACK = "5y"
 MODEL_CACHE_DIR = Path("data/models")
 MODEL_CACHE_FILE = MODEL_CACHE_DIR / "latest_model.joblib"
 
+# Model versioning — keep last N versions (Fix #45)
+MAX_MODEL_VERSIONS = 10
+
 
 def _load_cached_model() -> CrossSectionalModel | None:
     """Load a cached model if it was trained today. Returns None if stale or missing."""
@@ -59,14 +64,112 @@ def _load_cached_model() -> CrossSectionalModel | None:
 
 
 def _save_model_cache(model: CrossSectionalModel) -> None:
-    """Save a trained model to disk with today's date."""
+    """Save a trained model with versioning (Fix #45).
+
+    Creates a timestamped version file alongside the ``latest_model.joblib``
+    cache.  Old versions beyond ``MAX_MODEL_VERSIONS`` are pruned.
+
+    Each version is saved as ``model_<date>_<hash>.joblib`` where *hash* is a
+    short SHA-256 of the model parameters for uniqueness when multiple models
+    are trained on the same day.
+    """
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    today = date.today().isoformat()
+    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+
+    # Deterministic short hash from model params + timestamp for uniqueness
+    hash_input = json.dumps(model.params, sort_keys=True, default=str) + now_iso
+    short_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:8]
+
     payload = {
         "model": model,
-        "trained_date": date.today().isoformat(),
+        "trained_date": today,
+        "trained_at": now_iso,
+        "feature_cols": model.feature_cols,
+        "params": model.params,
     }
+
+    # 1. Save versioned copy
+    version_name = f"model_{today}_{short_hash}.joblib"
+    version_path = MODEL_CACHE_DIR / version_name
+    joblib.dump(payload, version_path)
+    logger.info(f"Saved model version: {version_path}")
+
+    # 2. Overwrite latest cache (for fast daily reload)
     joblib.dump(payload, MODEL_CACHE_FILE)
-    logger.info(f"Saved model cache to {MODEL_CACHE_FILE}")
+    logger.info(f"Updated latest model cache: {MODEL_CACHE_FILE}")
+
+    # 3. Prune old versions
+    _prune_old_versions()
+
+
+def _prune_old_versions() -> None:
+    """Keep only the most recent ``MAX_MODEL_VERSIONS`` versioned model files."""
+    versions = sorted(
+        MODEL_CACHE_DIR.glob("model_*_*.joblib"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in versions[MAX_MODEL_VERSIONS:]:
+        old.unlink()
+        logger.info(f"Pruned old model version: {old.name}")
+
+
+def list_model_versions() -> list[dict]:
+    """List all saved model versions with metadata.
+
+    Returns a list of dicts with keys: path, trained_date, trained_at, params.
+    Sorted newest-first.
+    """
+    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    versions = sorted(
+        MODEL_CACHE_DIR.glob("model_*_*.joblib"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    result = []
+    for v in versions:
+        try:
+            meta = joblib.load(v)
+            result.append(
+                {
+                    "path": str(v),
+                    "filename": v.name,
+                    "trained_date": meta.get("trained_date", "unknown"),
+                    "trained_at": meta.get("trained_at", "unknown"),
+                    "feature_cols": meta.get("feature_cols"),
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Could not read version {v.name}: {e}")
+    return result
+
+
+def load_model_version(version_path: str) -> CrossSectionalModel:
+    """Load a specific model version by path.
+
+    Args:
+        version_path: Path to the versioned joblib file.
+
+    Returns:
+        The deserialized CrossSectionalModel.
+
+    Raises:
+        FileNotFoundError: If the version file does not exist.
+        ValueError: If the file does not contain a valid model.
+    """
+    path = Path(version_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Model version not found: {version_path}")
+
+    cached = joblib.load(path)
+    model = cached.get("model")
+    if model is None:
+        raise ValueError(f"No model found in {version_path}")
+    logger.info(
+        f"Loaded model version {path.name} (trained {cached.get('trained_date', 'unknown')})"
+    )
+    return model
 
 
 def fetch_universe(tickers: list[str], period: str = MIN_HISTORY_DAYS) -> pd.DataFrame:
