@@ -76,7 +76,7 @@ def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet"):
 
     with mlflow.start_run(run_name="lgbm_alpha158"):
         model = CrossSectionalModel(model_type="lightgbm", feature_cols=FEATURE_COLS)
-        model.fit(train, target_col="target_5d")
+        model.fit(train, target_col="target_5d", val_df=val)
 
         val_preds = model.predict(val)
         ic = pd.Series(val_preds, index=val.index).corr(val["target_5d"])

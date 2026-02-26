@@ -152,10 +152,32 @@ def train_model(
 
     labeled = labeled.dropna(subset=available_cols + ["target_5d"])
 
-    logger.info(f"Training on {len(labeled)} samples with {len(available_cols)} features")
+    # Date-based train/val split: reserve last 20% of dates for validation
+    # with 5-day embargo to prevent target leakage (same approach as train.py)
+    dates = labeled.index.get_level_values(0).unique().sort_values()
+    split_date = dates[int(len(dates) * 0.8)]
+    embargo_offset = pd.tseries.offsets.BDay(5)
+    embargo_date = split_date + embargo_offset
+
+    train_data = labeled.loc[labeled.index.get_level_values(0) <= split_date]
+    val_data = labeled.loc[labeled.index.get_level_values(0) >= embargo_date]
+
+    logger.info(
+        f"Training on {len(train_data)} samples (up to {split_date.date()}), "
+        f"validating on {len(val_data)} samples (from {embargo_date.date()})"
+    )
 
     model = CrossSectionalModel(model_type="lightgbm", feature_cols=available_cols)
-    model.fit(labeled, target_col="target_5d")
+
+    if len(val_data) > 0:
+        model.fit(train_data, target_col="target_5d", val_df=val_data)
+        # Log validation IC
+        val_preds = model.predict(val_data)
+        ic = pd.Series(val_preds, index=val_data.index).corr(val_data["target_5d"])
+        logger.info(f"Live model validation IC: {ic:.4f}")
+    else:
+        logger.warning("No validation data available — training without early stopping")
+        model.fit(train_data, target_col="target_5d")
 
     # Cache the trained model
     _save_model_cache(model)
