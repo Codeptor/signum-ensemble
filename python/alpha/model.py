@@ -96,7 +96,7 @@ class CrossSectionalModel:
 
             if fit_kwargs.get("eval_set"):
                 best_iter = getattr(self.model, "best_iteration_", None)
-                if best_iter:
+                if best_iter is not None:
                     logger.info(f"Early stopping at iteration {best_iter}")
 
         elif self.model_type == "catboost":
@@ -123,6 +123,8 @@ class CrossSectionalModel:
 
     def feature_importance(self) -> pd.Series:
         """Return feature importance scores."""
+        if self.model is None:
+            raise ValueError("Model is not trained. Call fit() before feature_importance().")
         if self.model_type == "lightgbm":
             return pd.Series(
                 self.model.feature_importances_,

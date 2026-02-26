@@ -100,7 +100,7 @@ def should_rebalance_today() -> bool:
 
 def _get_next_rebalance_date() -> datetime:
     """Return the next rebalance date (for sleep calculation)."""
-    now = datetime.now()
+    now = datetime.now(tz=ZoneInfo("America/New_York"))
     if REBALANCE_FREQUENCY == "daily":
         # Next business day
         delta = 1 if now.weekday() < 4 else (7 - now.weekday())
@@ -128,8 +128,7 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
             break
         except Exception as e:
             logger.warning(
-                f"Could not cancel open orders during liquidation "
-                f"(attempt {attempt + 1}/3): {e}"
+                f"Could not cancel open orders during liquidation (attempt {attempt + 1}/3): {e}"
             )
             if attempt < 2:
                 time.sleep(1)
@@ -272,8 +271,10 @@ def _verify_order_fill(
                 logger.info(
                     f"  Timeout order had partial fill: {final_qty:.4f} {symbol} @ {final_price}"
                 )
-    except Exception:
-        pass  # Best effort — default to 0
+    except Exception as e:
+        logger.warning(
+            f"  Post-cancel order query failed for {symbol}: {e} — recording fill as {final_qty}"
+        )
 
     return {
         "status": "timeout",
@@ -301,9 +302,7 @@ def _cancel_existing_sl_tp_orders(broker: AlpacaBroker, symbol: str) -> int:
                 # Both are sell-side (closing the position)
                 # M-CANCEL fix: also check order_class to avoid cancelling
                 # non-SL/TP sell-side limit orders (e.g. manual sells)
-                is_sl_tp = (
-                    getattr(order, "order_class", None) in ("oco", "oto", "bracket", None)
-                )
+                is_sl_tp = getattr(order, "order_class", None) in ("oco", "oto", "bracket", None)
                 if order.side.lower() == "sell" and order.order_id and is_sl_tp:
                     try:
                         broker.cancel_order(order.order_id)
@@ -607,9 +606,7 @@ def run_trading_cycle(
             if total > 0:
                 for _ in range(10):  # Max 10 iterations, converges in 2-3
                     target_weights = {t: w / total for t, w in target_weights.items()}
-                    clamped = {
-                        t: min(w, MAX_POSITION_WEIGHT) for t, w in target_weights.items()
-                    }
+                    clamped = {t: min(w, MAX_POSITION_WEIGHT) for t, w in target_weights.items()}
                     total = sum(clamped.values())
                     if abs(total - 1.0) < 1e-6:
                         target_weights = clamped
@@ -657,7 +654,7 @@ def run_trading_cycle(
     fills = bridge.reconcile_target_weights(
         target_weights=target_weights,
         prices=prices,
-        current_date=datetime.now().strftime("%Y-%m-%d"),
+        current_date=datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d"),
     )
 
     if not fills:
@@ -762,7 +759,10 @@ def run_trading_cycle(
                 try:
                     total_pos = broker.get_position(entry["symbol"])
                     sl_tp_qty = round(abs(total_pos.qty), 4) if total_pos else actual_qty
-                except Exception:
+                except Exception as e:
+                    logger.warning(
+                        f"  get_position failed for {entry['symbol']}: {e} — using fill qty for SL/TP"
+                    )
                     sl_tp_qty = actual_qty
 
                 # Try ATR-based stops first, fall back to fixed %
@@ -941,7 +941,7 @@ def main():
         logger.info(f"Received signal {signum} (SIGTERM) — initiating graceful shutdown...")
         bridge_obj = _bridge_ref[0]
         state = {
-            "last_shutdown": datetime.now().isoformat(),
+            "last_shutdown": datetime.now(tz=ZoneInfo("America/New_York")).isoformat(),
             "reason": "sigterm",
         }
         if bridge_obj is not None:
@@ -1038,9 +1038,7 @@ def main():
                     weights = pd.Series()
                 # C-DD fix: pass live equity curve for accurate drawdown calc
                 live_eq = [pt["equity"] for pt in bridge.equity_curve]
-                risk_checks = risk_manager.check_portfolio_risk(
-                    weights, live_equity_curve=live_eq
-                )
+                risk_checks = risk_manager.check_portfolio_risk(weights, live_equity_curve=live_eq)
                 critical_violations = [
                     c for c in risk_checks if not c.passed and c.severity == "critical"
                 ]
@@ -1109,7 +1107,9 @@ def main():
                 # Persist state after trading cycle (P1-6)
                 _save_bot_state(
                     {
-                        "last_trade_date": datetime.now().isoformat(),
+                        "last_trade_date": datetime.now(
+                            tz=ZoneInfo("America/New_York")
+                        ).isoformat(),
                         "last_equity": bridge.equity,
                         "positions_count": len(bridge.positions),
                     }
@@ -1154,14 +1154,16 @@ def main():
         logger.info("Bot stopped by user (Ctrl+C).")
     except Exception as e:
         logger.error(f"Fatal error in bot loop: {e}", exc_info=True)
-        _send_alert(f"[LiveBot FATAL] Bot crashed at {datetime.now().isoformat()}: {e}")
+        _send_alert(
+            f"[LiveBot FATAL] Bot crashed at {datetime.now(tz=ZoneInfo('America/New_York')).isoformat()}: {e}"
+        )
     finally:
         # M-SIGTERM fix: don't overwrite richer SIGTERM state
         saved = _load_bot_state()
         if not saved or saved.get("reason") != "sigterm":
             _save_bot_state(
                 {
-                    "last_shutdown": datetime.now().isoformat(),
+                    "last_shutdown": datetime.now(tz=ZoneInfo("America/New_York")).isoformat(),
                     "final_equity": bridge.equity if "bridge" in locals() else None,
                     "reason": "shutdown",
                 }

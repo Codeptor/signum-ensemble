@@ -119,7 +119,7 @@ class RiskManager:
             List of RiskCheck results
         """
         checks = []
-        date_key = current_date or pd.Timestamp.now().strftime("%Y-%m-%d")
+        date_key = current_date or pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
 
         # C7/C8 fix: use absolute weight for limit checks so short positions
         # are validated the same as longs (previously only positive weights checked)
@@ -244,9 +244,7 @@ class RiskManager:
         if self.current_weights is not None:
             old_weight = self.current_weights.get(ticker, 0.0)
             # Gross exposure = sum of absolute weights (longs + shorts)
-            gross_exposure = (
-                self.current_weights.abs().sum() - abs(old_weight) + abs_weight
-            )
+            gross_exposure = self.current_weights.abs().sum() - abs(old_weight) + abs_weight
             if gross_exposure > self.limits.max_leverage:
                 checks.append(
                     RiskCheck(
@@ -288,10 +286,9 @@ class RiskManager:
         if sector and not self.current_weights.empty:
             # Sum absolute weights for gross sector exposure (C-SECTOR fix)
             sector_tickers = [t for t, s in self.sector_map.items() if s == sector and t != ticker]
-            sector_weight = (
-                sum(abs(self.current_weights.get(t, 0.0)) for t in sector_tickers)
-                + abs(new_weight)
-            )
+            sector_weight = sum(
+                abs(self.current_weights.get(t, 0.0)) for t in sector_tickers
+            ) + abs(new_weight)
             if sector_weight > self.limits.max_sector_weight:
                 checks.append(
                     RiskCheck(
@@ -442,7 +439,7 @@ class RiskManager:
         current_date: Optional[str] = None,
     ):
         """Record a trade for daily limit tracking."""
-        date_key = current_date or pd.Timestamp.now().strftime("%Y-%m-%d")
+        date_key = current_date or pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
 
         # Skip small weight changes (dust trades)
         if abs(weight_change) < 0.001:
@@ -450,7 +447,9 @@ class RiskManager:
 
         # M4 fix: prune entries older than 7 days to prevent unbounded growth
         if len(self.daily_trades) > 30:
-            cutoff = (pd.Timestamp.now() - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+            cutoff = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=7)).strftime(
+                "%Y-%m-%d"
+            )
             self.daily_trades = {k: v for k, v in self.daily_trades.items() if k >= cutoff}
             self.daily_turnover = {k: v for k, v in self.daily_turnover.items() if k >= cutoff}
 
@@ -460,12 +459,15 @@ class RiskManager:
         # Update turnover
         self.daily_turnover[date_key] = self.daily_turnover.get(date_key, 0.0) + abs(weight_change)
 
-        # Update current weights
+        # Update current weights — clamp to [0, 1] to prevent accidental
+        # negative (short) exposure from rounding or overshoot.
         if self.current_weights is not None:
             if ticker in self.current_weights.index:
-                self.current_weights[ticker] += weight_change
+                self.current_weights[ticker] = max(
+                    0.0, self.current_weights[ticker] + weight_change
+                )
             else:
-                self.current_weights[ticker] = weight_change
+                self.current_weights[ticker] = max(0.0, weight_change)
 
     def get_risk_summary(self) -> Dict:
         """Get summary of current risk status."""
@@ -543,21 +545,29 @@ class PositionSizer:
         portfolio_value: float = 1.0,
     ) -> float:
         """
-        Calculate position size based on risk amount.
+        Calculate position size as a fraction of portfolio based on risk amount.
 
-        position_size = (portfolio_value × risk_per_trade) / stop_loss
+        fraction = risk_per_trade / stop_loss_pct
+
+        The result is independent of portfolio_value — it always returns a
+        fraction (0.0 to max_position_weight).  The portfolio_value parameter
+        is kept for backward compatibility but is no longer used in the
+        calculation.
 
         Args:
             stop_loss_pct: Stop loss percentage (e.g., 0.05 for 5%)
-            portfolio_value: Portfolio value (default: 1.0 for % sizing)
+            portfolio_value: Deprecated — ignored.  Kept for API compat.
 
         Returns:
-            Position size as fraction of portfolio
+            Position size as fraction of portfolio (0.0 to max_position_weight).
         """
         if stop_loss_pct == 0:
             return 0.0
 
-        size = (portfolio_value * self.risk_per_trade) / stop_loss_pct
+        # Always return a fraction: risk_per_trade / stop_loss gives the
+        # fraction of portfolio to allocate so that a stop_loss_pct adverse
+        # move loses exactly risk_per_trade of equity.
+        size = self.risk_per_trade / stop_loss_pct
         return min(size, self.max_position_weight)
 
     def volatility_adjusted_size(

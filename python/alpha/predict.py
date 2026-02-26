@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import random
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -87,7 +87,7 @@ def _save_model_cache(model: CrossSectionalModel) -> None:
     """
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     today = date.today().isoformat()
-    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+    now_iso = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
     # Deterministic short hash from model params + timestamp for uniqueness
     hash_input = json.dumps(model.params, sort_keys=True, default=str) + now_iso

@@ -273,7 +273,7 @@ class RiskAttribution:
             try:
                 results["risk_parity"] = self.risk_parity_weights()
             except RuntimeError as e:
-                print(f"Risk parity optimization failed: {e}")
+                logger.error(f"Risk parity optimization failed: {e}")
                 results["risk_parity"] = pd.Series(np.nan, index=self.tickers)
 
         return pd.DataFrame(results)

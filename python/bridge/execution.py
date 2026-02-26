@@ -9,7 +9,7 @@ Connects portfolio decisions to order execution with:
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -32,7 +32,7 @@ class Order:
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = datetime.now(tz=timezone.utc)
 
 
 @dataclass
@@ -142,7 +142,9 @@ class ExecutionBridge:
         self._last_prices: Dict[str, float] = {}
 
         # Performance tracking
-        self.equity_curve: List[Dict] = [{"timestamp": datetime.now(), "equity": initial_capital}]
+        self.equity_curve: List[Dict] = [
+            {"timestamp": datetime.now(tz=timezone.utc), "equity": initial_capital}
+        ]
 
     def get_position(self, ticker: str) -> Position:
         """Get or create position for ticker."""
@@ -241,7 +243,7 @@ class ExecutionBridge:
 
         # M7 fix: check if sell would open a short (sell more than we hold)
         if order.side == "SELL":
-            current_pos = self.get_position(order.ticker) if hasattr(self, 'positions') else None
+            current_pos = self.get_position(order.ticker) if hasattr(self, "positions") else None
             current_qty = current_pos.quantity if current_pos else 0
             if order.quantity > current_qty:
                 # H-SHORT fix: short sells need margin — compare against equity
@@ -256,7 +258,7 @@ class ExecutionBridge:
             fill_price=current_price,
             fill_quantity=order.quantity,
             commission=commission,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(tz=timezone.utc),
         )
 
         return fill
@@ -298,7 +300,9 @@ class ExecutionBridge:
         self.equity = self.cash + positions_value
 
         # Record equity curve point (M6 fix: cap at 10k entries to prevent unbounded growth)
-        self.equity_curve.append({"timestamp": datetime.now(), "equity": self.equity})
+        self.equity_curve.append(
+            {"timestamp": datetime.now(tz=timezone.utc), "equity": self.equity}
+        )
         if len(self.equity_curve) > 10_000:
             # H-EQCURVE fix: non-overlapping compaction — subsample old, keep recent
             historical = self.equity_curve[:-1000][::10]

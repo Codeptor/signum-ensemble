@@ -409,14 +409,17 @@ class AlpacaBroker(BaseBroker):
             for sym, trade in trades.items():
                 prices[sym] = float(trade.price)
             missing = [s for s in symbols if s not in prices]
-        except Exception:
+        except Exception as e:
             # Fallback: try per-symbol if batch API fails
+            logger.warning(f"Batch price fetch failed ({e}), falling back to per-symbol")
+            missing = list(symbols)  # Reset — all symbols need individual fetch
             for sym in symbols:
                 try:
                     trade = self.api.get_latest_trade(sym)
                     prices[sym] = float(trade.price)
-                except Exception:
-                    missing.append(sym)
+                    missing.remove(sym)
+                except Exception as e2:
+                    logger.debug(f"Per-symbol price fetch failed for {sym}: {e2}")
 
         # Batch fallback to yfinance for any Alpaca misses
         if missing:
@@ -444,8 +447,8 @@ class AlpacaBroker(BaseBroker):
                     if sym not in prices:
                         try:
                             prices[sym] = self._yfinance_price(sym)
-                        except Exception:
-                            pass
+                        except Exception as e3:
+                            logger.warning(f"All price sources failed for {sym}: {e3}")
 
         return prices
 
