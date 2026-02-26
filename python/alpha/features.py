@@ -170,7 +170,22 @@ def merge_macro_features(
     Loads macro data, computes derived signals, and broadcasts to all tickers
     via date alignment with forward-fill.
     """
-    macro = pd.read_parquet(macro_path)
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Check if macro file exists
+    import os
+
+    if not os.path.exists(macro_path):
+        logger.warning(f"Macro indicators file not found: {macro_path}. Skipping macro features.")
+        return df
+
+    try:
+        macro = pd.read_parquet(macro_path)
+    except Exception as e:
+        logger.warning(f"Could not load macro indicators: {e}. Skipping macro features.")
+        return df
 
     # Derived macro features
     macro["vix_ma_ratio"] = macro["vix"] / macro["vix"].rolling(20).mean()

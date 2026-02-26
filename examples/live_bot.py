@@ -223,8 +223,9 @@ def _has_traded_today(broker: AlpacaBroker) -> bool:
 
         return False
     except Exception as e:
-        logger.warning(f"Could not check if traded today: {e}. Assuming no trades.")
-        return False
+        logger.error(f"Could not check if traded today: {e}. HALTING to prevent duplicate trades.")
+        # Fail closed: assume we traded to prevent duplicate execution
+        return True
 
 
 def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> None:
@@ -639,11 +640,26 @@ def main():
             is_open = clock["is_open"]
 
             if is_open:
+                # Check if already traded today (duplicate execution guard inside loop)
+                if _has_traded_today(broker):
+                    logger.info("Already traded today. Skipping cycle.")
+                    time.sleep(60 * 60 * 4)  # Sleep 4 hours
+                    continue
+
                 # Re-initialize risk engine each cycle to capture new positions
                 _initialize_risk_engine(broker, risk_manager)
 
                 # Check portfolio-level risk before trading
-                risk_checks = risk_manager.check_portfolio_risk(pd.Series())
+                # Get current position weights from broker
+                positions = broker.list_positions()
+                account = broker.get_account()
+                if positions and account.equity > 0:
+                    weights = pd.Series(
+                        {p.symbol: p.market_value / account.equity for p in positions}
+                    )
+                else:
+                    weights = pd.Series()
+                risk_checks = risk_manager.check_portfolio_risk(weights)
                 critical_violations = [
                     c for c in risk_checks if not c.passed and c.severity == "critical"
                 ]

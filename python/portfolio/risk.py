@@ -58,7 +58,8 @@ class RiskEngine:
         z_cf = z + (z**2 - 1) * s / 6 + (z**3 - 3 * z) * k / 24 - (2 * z**3 - 5 * z) * s**2 / 36
 
         # Return negative value to match var_parametric and var_historical sign convention
-        return float(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std())
+        # VaR should be negative (e.g., -0.02 means 2% loss)
+        return -float(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std())
 
     def cvar_historical(self, confidence: float = 0.95) -> float:
         """Conditional VaR (Expected Shortfall) via historical simulation."""

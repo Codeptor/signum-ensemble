@@ -347,10 +347,12 @@ class ExecutionBridge:
                 if ticker not in prices:
                     logger.warning(f"Cannot close stale position {ticker}: no price available")
                     continue
+                # For short positions (quantity < 0), we need to BUY to cover
+                close_side = "BUY" if pos.quantity < 0 else "SELL"
                 fill = self.submit_order(
                     ticker=ticker,
-                    side="SELL",
-                    quantity=pos.quantity,
+                    side=close_side,
+                    quantity=abs(pos.quantity),
                     current_price=prices[ticker],
                     current_date=current_date,
                 )
@@ -365,6 +367,9 @@ class ExecutionBridge:
                 continue
 
             current_price = prices[ticker]
+            if current_price <= 0:
+                logger.warning(f"Invalid price {current_price} for {ticker}, skipping")
+                continue
             target_value = target_weight * snapshot_equity
             target_quantity = target_value / current_price
 
