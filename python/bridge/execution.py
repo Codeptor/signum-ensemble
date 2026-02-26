@@ -62,18 +62,46 @@ class Position:
         return self.quantity * current_price
 
     def update(self, fill: Fill) -> None:
-        """Update position with new fill."""
+        """Update position with new fill.
+
+        Handles both long and short positions correctly:
+        - Long entry: avg_cost weighted average
+        - Short entry: avg_cost tracks entry price (negative quantity)
+        - Long cover: P&L realized, quantity reduced
+        - Short cover: P&L realized, quantity increased toward zero
+        """
         if fill.order.side == "BUY":
-            # Calculate new average cost
-            total_cost = (self.quantity * self.avg_cost) + (fill.fill_quantity * fill.fill_price)
-            self.quantity += fill.fill_quantity
-            if self.quantity > 0:
-                self.avg_cost = total_cost / self.quantity
+            if self.quantity >= 0:
+                # Adding to long position or flat -> long
+                total_cost = (self.quantity * self.avg_cost) + (
+                    fill.fill_quantity * fill.fill_price
+                )
+                self.quantity += fill.fill_quantity
+                self.avg_cost = total_cost / self.quantity if self.quantity != 0 else 0.0
+            else:
+                # Covering short position
+                cover_qty = min(fill.fill_quantity, abs(self.quantity))
+                self.realized_pnl += cover_qty * (self.avg_cost - fill.fill_price)
+                self.quantity += fill.fill_quantity
+                if self.quantity > 0:
+                    # Switch to long - new avg_cost is fill price for remaining
+                    self.avg_cost = fill.fill_price
         else:  # SELL
-            # Calculate realized P&L
             if self.quantity > 0:
-                self.realized_pnl += fill.fill_quantity * (fill.fill_price - self.avg_cost)
-            self.quantity -= fill.fill_quantity
+                # Reducing long position
+                sell_qty = min(fill.fill_quantity, self.quantity)
+                self.realized_pnl += sell_qty * (fill.fill_price - self.avg_cost)
+                self.quantity -= fill.fill_quantity
+                if self.quantity < 0:
+                    # Switch to short - new avg_cost is fill price for remaining
+                    self.avg_cost = fill.fill_price
+            else:
+                # Adding to short position
+                total_cost = (abs(self.quantity) * self.avg_cost) + (
+                    fill.fill_quantity * fill.fill_price
+                )
+                self.quantity -= fill.fill_quantity
+                self.avg_cost = total_cost / abs(self.quantity) if self.quantity != 0 else 0.0
 
         if abs(self.quantity) < 1e-10:
             self.quantity = 0.0
@@ -111,6 +139,7 @@ class ExecutionBridge:
         self.orders: List[Order] = []
         self.fills: List[Fill] = []
         self.daily_pnl: Dict[str, float] = {}
+        self._last_prices: Dict[str, float] = {}
 
         # Performance tracking
         self.equity_curve: List[Dict] = [{"timestamp": datetime.now(), "equity": initial_capital}]
@@ -228,11 +257,17 @@ class ExecutionBridge:
 
         Args:
             prices: Dictionary mapping ticker -> current price.
-                    Positions without a price entry are valued at their avg cost.
+                    Positions without a price entry are valued at their last-known price.
         """
+        # Update last-known prices
+        self._last_prices.update(prices)
+
         positions_value = 0.0
         for ticker, pos in self.positions.items():
-            price = prices.get(ticker, pos.avg_cost)
+            price = prices.get(ticker, self._last_prices.get(ticker))
+            if price is None:
+                # No price available - use avg_cost as last resort (P&L will show as zero)
+                price = pos.avg_cost
             positions_value += pos.market_value(price)
         self.equity = self.cash + positions_value
 
@@ -308,7 +343,7 @@ class ExecutionBridge:
         # Close positions not in target weights (stale positions)
         for ticker in list(self.positions.keys()):
             pos = self.positions[ticker]
-            if pos.quantity > 1e-6 and ticker not in target_weights:
+            if abs(pos.quantity) > 1e-6 and ticker not in target_weights:
                 if ticker not in prices:
                     logger.warning(f"Cannot close stale position {ticker}: no price available")
                     continue
