@@ -388,29 +388,13 @@ class AlpacaBroker(BaseBroker):
         prices: Dict[str, float] = {}
         missing: list[str] = []
 
-        # Try Alpaca batch endpoint first (P1-3: batch price fetching)
-        try:
-            if hasattr(self.api, "get_latest_trades"):
-                # Alpaca-py API
-                trades = self.api.get_latest_trades(symbols)
-                for sym in symbols:
-                    if sym in trades:
-                        prices[sym] = float(trades[sym].price)
-                    else:
-                        missing.append(sym)
-            else:
-                # Fallback: try individual calls with proper error handling (P1-4)
-                for sym in symbols:
-                    try:
-                        trade = self.api.get_latest_trade(sym)
-                        prices[sym] = float(trade.price)
-                    except Exception as e:
-                        # Log the error but don't swallow all exceptions
-                        logger.warning(f"Alpaca price fetch failed for {sym}: {e}")
-                        missing.append(sym)
-        except Exception as e:
-            logger.error(f"Alpaca batch price fetch failed: {e}")
-            missing = [s for s in symbols if s not in prices]
+        # Try Alpaca for each symbol individually
+        for sym in symbols:
+            try:
+                trade = self.api.get_latest_trade(sym)
+                prices[sym] = float(trade.price)
+            except Exception:
+                missing.append(sym)
 
         # Batch fallback to yfinance for any Alpaca misses
         if missing:
