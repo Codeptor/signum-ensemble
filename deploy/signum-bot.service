@@ -12,7 +12,7 @@ Environment="PYTHONPATH=/opt/signum"
 EnvironmentFile=/opt/signum/.env
 
 # Start the bot with the launcher script
-ExecStart=/opt/signum/.venv/bin/python /opt/signum/.venv/bin/python examples/live_bot.py
+ExecStart=/opt/signum/.venv/bin/python examples/live_bot.py
 
 # Restart on failure with backoff
 Restart=on-failure
