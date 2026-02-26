@@ -33,7 +33,6 @@ FEATURE_COLS = [
     "macd_signal",
     "bb_position",
     "volume_ratio",
-    "hl_range",
     "dollar_volume_20d",
     "amihud_illiq",
     "bid_ask_proxy",

@@ -3,6 +3,45 @@
 import numpy as np
 import pandas as pd
 
+# Columns that should be winsorized to limit outlier impact (Fix #20)
+_WINSORIZE_COLS = [
+    "ret_5d",
+    "ret_10d",
+    "ret_20d",
+    "vol_5d",
+    "vol_10d",
+    "vol_20d",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "bb_position",
+    "volume_ratio",
+    "amihud_illiq",
+    "bid_ask_proxy",
+]
+
+
+def winsorize(
+    df: pd.DataFrame,
+    cols: list[str] | None = None,
+    lower: float = 0.01,
+    upper: float = 0.99,
+) -> pd.DataFrame:
+    """Clip feature columns at the given percentiles to limit outlier impact.
+
+    Args:
+        df: Input DataFrame.
+        cols: Columns to winsorize. If None, uses default feature list.
+        lower: Lower percentile (e.g. 0.01 for 1st percentile).
+        upper: Upper percentile (e.g. 0.99 for 99th percentile).
+    """
+    cols = cols or [c for c in _WINSORIZE_COLS if c in df.columns]
+    for col in cols:
+        lo = df[col].quantile(lower)
+        hi = df[col].quantile(upper)
+        df[col] = df[col].clip(lo, hi)
+    return df
+
 
 def compute_alpha_features(df: pd.DataFrame) -> pd.DataFrame:
     """Compute technical features per ticker.
@@ -35,9 +74,10 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
         df[f"ma_{w}"] = c.rolling(w).mean()
         df[f"ma_ratio_{w}"] = c / c.rolling(w).mean()
 
-    # Volatility
+    # Volatility (using log returns for time-additivity — Fix #21)
+    log_ret = np.log(c / c.shift(1))
     for w in [5, 10, 20]:
-        df[f"vol_{w}d"] = c.pct_change().rolling(w).std()
+        df[f"vol_{w}d"] = log_ret.rolling(w).std()
 
     # RSI
     for w in [14]:
@@ -72,8 +112,7 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["bid_ask_proxy"] = (h - lo) / c  # Corwin-Schultz spread proxy
 
-    # High-low range
-    df["hl_range"] = (h - lo) / c
+    # Open-close range
     df["oc_range"] = (c - o) / c
 
     return df
@@ -90,7 +129,13 @@ def compute_forward_returns(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
         g = group.copy()
         g[f"target_{horizon}d"] = g["close"].pct_change(periods=horizon).shift(-horizon)
         results.append(g)
-    return pd.concat(results).sort_index()
+    out = pd.concat(results).sort_index()
+
+    # Winsorize targets at 1st/99th percentile to limit outlier impact
+    target_col = f"target_{horizon}d"
+    if target_col in out.columns:
+        out = winsorize(out, cols=[target_col])
+    return out
 
 
 def compute_cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
