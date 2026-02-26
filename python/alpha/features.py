@@ -205,6 +205,97 @@ def merge_macro_features(
     return df
 
 
+def compute_atr(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
+    """Compute Average True Range for dynamic stop-loss placement.
+
+    ATR measures a stock's natural volatility, enabling adaptive stop-loss
+    distances that account for each stock's typical price movement.
+
+    Args:
+        df: DataFrame with columns [high, low, close] and a DatetimeIndex.
+            Can be single-ticker or multi-ticker (with 'ticker' column).
+        window: ATR lookback period in days (default 14).
+
+    Returns:
+        DataFrame with added ``atr_{window}`` column.
+    """
+    if "ticker" in df.columns:
+        # Multi-ticker: compute per ticker
+        results = []
+        for ticker, group in df.groupby("ticker"):
+            g = group.copy()
+            g = _compute_atr_single(g, window)
+            results.append(g)
+        return pd.concat(results).sort_index()
+    else:
+        return _compute_atr_single(df.copy(), window)
+
+
+def _compute_atr_single(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
+    """Compute ATR for a single ticker's OHLC data."""
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df[f"atr_{window}"] = true_range.rolling(window).mean()
+
+    return df
+
+
+def get_current_atr(
+    symbol: str,
+    window: int = 14,
+    period: str = "3mo",
+) -> float | None:
+    """Fetch current ATR for a single symbol from Yahoo Finance.
+
+    Convenience function for the live bot to get ATR for stop-loss placement.
+
+    Args:
+        symbol: Ticker symbol.
+        window: ATR lookback period.
+        period: Yahoo Finance period string for data fetch.
+
+    Returns:
+        Current ATR value, or None if data unavailable.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        import yfinance as yf
+
+        data = yf.download(symbol, period=period, interval="1d", progress=False)
+        if data is None or len(data) < window + 1:
+            logger.warning(f"Insufficient data for ATR computation: {symbol}")
+            return None
+
+        # Compute ATR
+        high = data["High"]
+        low = data["Low"]
+        close = data["Close"]
+
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.rolling(window).mean()
+
+        current_atr = float(atr.iloc[-1])
+        logger.debug(f"ATR({window}) for {symbol}: {current_atr:.2f}")
+        return current_atr
+    except Exception as e:
+        logger.warning(f"Failed to compute ATR for {symbol}: {e}")
+        return None
+
+
 def compute_residual_target(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
     """Subtract cross-sectional mean return to create a market-neutral target.
 
