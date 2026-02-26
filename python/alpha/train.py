@@ -41,6 +41,11 @@ FEATURE_COLS = [
     "cs_ret_rank_20d",
     "cs_vol_rank_20d",
     "cs_volume_rank",
+    # Macro regime features
+    "vix",
+    "vix_ma_ratio",
+    "term_spread",
+    "term_spread_change_20d",
 ]
 
 

@@ -20,10 +20,14 @@ from datetime import datetime
 
 import pandas as pd
 
+import json
+from pathlib import Path
+
 from python.alpha.predict import get_ml_weights
 from python.bridge.execution import ExecutionBridge
 from python.brokers.alpaca_broker import AlpacaBroker
 from python.brokers.base import BrokerOrder
+from python.monitoring.drift import DriftDetector
 from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 # --- Logging with rotation (Fix #36) ---
@@ -165,6 +169,32 @@ def _cancel_existing_sl_tp_orders(broker: AlpacaBroker, symbol: str) -> int:
         return 0
 
 
+# --- State persistence (P1-6) ---
+STATE_FILE = Path("data/bot_state.json")
+
+
+def _load_bot_state() -> dict:
+    """Load persisted bot state from disk."""
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Could not load bot state: {e}")
+        return {}
+
+
+def _save_bot_state(state: dict) -> None:
+    """Persist bot state to disk."""
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not save bot state: {e}")
+
+
 def _has_traded_today(broker: AlpacaBroker) -> bool:
     """Check if the bot has already submitted orders today.
 
@@ -259,6 +289,17 @@ def run_trading_cycle(
     logger.info("Starting daily trading cycle...")
     logger.info("=" * 60)
 
+    # Check for data staleness (P1-8)
+    try:
+        clock = broker.get_clock()
+        if not clock.get("is_open", False):
+            logger.info("Market is closed — skipping cycle")
+            return False
+    except Exception as e:
+        logger.error(f"Could not check market status: {e}")
+        _send_alert(f"[LiveBot] Failed to check market status: {e}")
+        return False
+
     # 1. Cancel stale open orders — but preserve bracket SL/TP legs
     #    Bracket legs (stop-loss, take-profit) have a parent_order_id and
     #    protect open positions. Cancelling them leaves the portfolio unhedged
@@ -294,6 +335,7 @@ def run_trading_cycle(
         )
     except Exception as e:
         logger.error(f"ML pipeline failed: {e}", exc_info=True)
+        _send_alert(f"[LiveBot] ML pipeline failed: {e}")
         return False
 
     if not target_weights:
@@ -320,6 +362,7 @@ def run_trading_cycle(
 
     if not target_weights:
         logger.error("No tradeable tickers remaining — skipping cycle")
+        _send_alert(f"[LiveBot] No tradeable tickers after price filtering")
         return False
 
     # 4. Sync execution bridge with current account/positions from broker
@@ -613,6 +656,15 @@ def main():
 
                 traded = run_trading_cycle(broker, risk_manager, bridge)
 
+                # Persist state after trading cycle (P1-6)
+                _save_bot_state(
+                    {
+                        "last_trade_date": datetime.now().isoformat(),
+                        "last_equity": bridge.equity,
+                        "positions_count": len(bridge.positions),
+                    }
+                )
+
                 if traded:
                     # Sleep until next market open (dynamic, Fix #34)
                     next_open = clock.get("next_open")
@@ -654,6 +706,14 @@ def main():
         logger.error(f"Fatal error in bot loop: {e}", exc_info=True)
         _send_alert(f"[LiveBot FATAL] Bot crashed at {datetime.now().isoformat()}: {e}")
     finally:
+        # Persist final state before exit (P1-6)
+        _save_bot_state(
+            {
+                "last_shutdown": datetime.now().isoformat(),
+                "final_equity": bridge.equity if "bridge" in locals() else None,
+                "reason": "shutdown",
+            }
+        )
         broker.disconnect()
         logger.info("Bot shutdown complete.")
 
