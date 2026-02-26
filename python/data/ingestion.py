@@ -1,16 +1,34 @@
-"""Data ingestion from yfinance and other free sources."""
+"""Data ingestion from yfinance and other free sources.
+
+NOTE — Survivorship bias (Finding #29):
+``fetch_sp500_tickers()`` scrapes the **current** S&P 500 constituents from
+Wikipedia.  When used for historical backtests this introduces survivorship
+bias: companies that were removed, delisted, or acquired before today are
+excluded, which inflates backtest returns.  For paper-trading the current
+universe is acceptable, but any backtest that uses this function should
+clearly state that the universe is point-in-time *inaccurate*.  A proper
+fix requires a point-in-time membership table (e.g. Sharadar, daily
+snapshots of the index).
+"""
 
 import logging
 from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
+from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
 from python.data.config import DEFAULT_INTERVAL, DEFAULT_PERIOD, RAW_DIR
 
 logger = logging.getLogger(__name__)
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 def fetch_sp500_tickers() -> list[str]:
     """Fetch current S&P 500 constituent tickers from Wikipedia."""
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -18,6 +36,12 @@ def fetch_sp500_tickers() -> list[str]:
     return sorted(table["Symbol"].str.replace(".", "-", regex=False).tolist())
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 def fetch_ohlcv(
     tickers: list[str],
     period: str = DEFAULT_PERIOD,
@@ -26,9 +50,31 @@ def fetch_ohlcv(
     """Download OHLCV data for given tickers via yfinance."""
     logger.info(f"Fetching OHLCV for {len(tickers)} tickers, period={period}")
     df = yf.download(tickers, period=period, interval=interval, group_by="ticker", threads=True)
+
+    # --- NaN validation (Finding #28) ---
+    if df.empty:
+        raise ValueError("yfinance returned an empty DataFrame — check tickers/period")
+    nan_frac = df.isna().mean()
+    # Per-column NaN fraction; warn if any column exceeds 5%
+    high_nan = nan_frac[nan_frac > 0.05]
+    if not high_nan.empty:
+        logger.warning(f"Columns with >5%% NaN after download:\n{high_nan}")
+    # Forward-fill small gaps (weekends/holidays already absent), then drop
+    # any remaining rows that are entirely NaN for a ticker.
+    df = df.ffill(limit=3)
+    remaining_nans = df.isna().sum().sum()
+    if remaining_nans > 0:
+        logger.warning(f"Dropping {remaining_nans} residual NaN values after ffill(limit=3)")
+        df = df.dropna(axis=0, how="all")
     return df
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 def fetch_fred_macro() -> pd.DataFrame:
     """Fetch key macro indicators from FRED via yfinance."""
     macro_tickers = {
@@ -43,6 +89,11 @@ def fetch_fred_macro() -> pd.DataFrame:
         # yfinance may return DataFrame instead of Series; squeeze to 1-D
         if isinstance(close, pd.DataFrame):
             close = close.squeeze(axis=1)
+        if close.isna().sum() > 0:
+            logger.warning(
+                f"Macro ticker {ticker}: {close.isna().sum()} NaN values — forward-filling"
+            )
+            close = close.ffill()
         frames[name] = close
     return pd.DataFrame(frames)
 

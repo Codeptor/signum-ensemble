@@ -15,6 +15,7 @@ dependencies = [
     "mlflow>=2.10",
     "plotly>=5.18",
     "dash>=2.14",
+    "tenacity>=8.2",
 ]
 
 [project.optional-dependencies]
