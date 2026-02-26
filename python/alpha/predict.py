@@ -106,9 +106,9 @@ def _save_model_cache(model: CrossSectionalModel) -> None:
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     # R3-P-14 fix: use NY timezone for staleness key
     try:
-        from zoneinfo import ZoneInfo as _ZI
+        from zoneinfo import ZoneInfo
 
-        today = datetime.now(tz=_ZI("America/New_York")).date().isoformat()
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date().isoformat()
     except Exception:
         today = date.today().isoformat()
     now_iso = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")

@@ -449,7 +449,7 @@ def _chart_turnover(turnover: pd.Series) -> go.Figure:
             x=turnover.index,
             y=turnover.values,
             name="Turnover",
-            marker=dict(color=f"rgba(68, 136, 255, 0.5)", line=dict(width=0)),
+            marker=dict(color="rgba(68, 136, 255, 0.5)", line=dict(width=0)),
         )
     )
     fig.add_hline(
@@ -704,7 +704,7 @@ def _positions_table(positions: list) -> html.Table:
 _TAB_STYLE = {
     "padding": f"{_SP_2} {_SP_5}",
     "border": "none",
-    "borderBottom": f"2px solid transparent",
+    "borderBottom": "2px solid transparent",
     "background": "transparent",
     "cursor": "pointer",
     "fontFamily": _FONT_SANS,
@@ -894,7 +894,7 @@ def _build_live_tab() -> html.Div:
                     "display": "flex",
                     "alignItems": "center",
                     "backgroundColor": _DANGER_DIM,
-                    "border": f"1px solid rgba(239, 68, 68, 0.20)",
+                    "border": "1px solid rgba(239, 68, 68, 0.20)",
                     "borderRadius": _RADIUS_MD,
                     "padding": f"{_SP_3} {_SP_4}",
                     "marginBottom": _SP_4,
@@ -1479,7 +1479,8 @@ def register_api_routes(app: dash.Dash) -> None:
                 "name": "Signum Trading Cockpit API",
                 "description": (
                     "JSON API for the Signum quantitative trading system. "
-                    "All endpoints return structured JSON. No authentication required (paper trading)."
+                    "All endpoints return structured JSON. "
+                    "No authentication required (paper trading)."
                 ),
                 "timestamp": datetime.now().isoformat(),
                 "endpoints": {path: desc for path, desc in _API_ENDPOINTS.items()},
