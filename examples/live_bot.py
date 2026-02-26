@@ -105,10 +105,25 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
     logger.info("Starting daily trading cycle...")
     logger.info("=" * 60)
 
-    # 1. Cancel any stale open orders from previous cycles
-    logger.info("Cancelling stale open orders...")
+    # 1. Cancel stale open orders — but preserve bracket SL/TP legs
+    #    Bracket legs (stop-loss, take-profit) have a parent_order_id and
+    #    protect open positions. Cancelling them leaves the portfolio unhedged
+    #    during the ~2.5 minute ML pipeline run.
+    logger.info("Cancelling stale open orders (preserving bracket SL/TP legs)...")
     try:
-        cancelled = broker.cancel_all_orders()
+        open_orders = broker.list_orders(status="open")
+        cancelled = 0
+        for order in open_orders:
+            # Skip bracket child legs (SL/TP) — they protect existing positions
+            if order.parent_order_id:
+                logger.info(
+                    f"  Keeping bracket leg: {order.order_type} {order.symbol} "
+                    f"(parent: {order.parent_order_id})"
+                )
+                continue
+            if order.order_id:
+                broker.cancel_order(order.order_id)
+                cancelled += 1
         if cancelled > 0:
             logger.info(f"  Cancelled {cancelled} stale orders.")
         else:

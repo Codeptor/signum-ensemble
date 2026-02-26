@@ -26,6 +26,10 @@ class BrokerOrder:
     take_profit_limit_price: Optional[float] = None
     stop_loss_stop_price: Optional[float] = None
     stop_loss_limit_price: Optional[float] = None
+    # Identification (populated when reading orders back from broker)
+    order_id: Optional[str] = None
+    parent_order_id: Optional[str] = None
+    status: Optional[str] = None
 
 
 @dataclass

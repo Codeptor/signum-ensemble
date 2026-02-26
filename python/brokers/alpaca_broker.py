@@ -198,6 +198,10 @@ class AlpacaBroker(BaseBroker):
                 stop_price=float(order.stop_price) if order.stop_price else None,
                 time_in_force=order.time_in_force,
                 client_order_id=order.client_order_id,
+                order_id=order.id,
+                parent_order_id=getattr(order, "parent_order_id", None),
+                status=order.status,
+                order_class=getattr(order, "order_class", None),
             )
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
@@ -220,6 +224,10 @@ class AlpacaBroker(BaseBroker):
                     stop_price=float(o.stop_price) if o.stop_price else None,
                     time_in_force=o.time_in_force,
                     client_order_id=o.client_order_id,
+                    order_id=o.id,
+                    parent_order_id=getattr(o, "parent_order_id", None),
+                    status=o.status,
+                    order_class=getattr(o, "order_class", None),
                 )
                 for o in orders
             ]
