@@ -18,5 +18,7 @@ def test_create_bl_views():
 
     assert len(views) == 5
     assert len(view_confidences) == 5
-    # Higher confidence → lower uncertainty
-    assert view_confidences["AAPL"] < view_confidences["GOOG"]
+    # Higher ML confidence → higher Idzorek confidence (Fix #42)
+    assert view_confidences["AAPL"] > view_confidences["GOOG"]
+    # All confidences in valid range (0, 1]
+    assert all(0 < c <= 1.0 for c in view_confidences)
