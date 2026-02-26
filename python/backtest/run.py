@@ -320,9 +320,7 @@ def run_backtest(
             # 3. Spread Drag
             # Let's parameterize spread multiplier or zero it for debugging
             spread = top_data["bid_ask_proxy"].reindex(all_tickers).fillna(0).clip(0, 0.02)
-            spread_cost = (
-                trade_value * spread * 0.5 * 0.0
-            )  # Setting to 0 for a moment to see if this was the killer
+            spread_cost = trade_value * spread * 0.5  # Half-spread as transaction cost
 
             # 4. Market Impact
             adv = top_data["dollar_volume_20d"].reindex(all_tickers).fillna(1e6)
