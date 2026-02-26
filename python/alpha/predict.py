@@ -337,8 +337,12 @@ def optimize_weights(
 
     if prices.empty or len(prices.columns) < 2:
         logger.warning("Not enough price data for optimization, using equal weight")
-        n = len(tickers)
-        return {t: 1.0 / n for t in tickers}
+        # Use surviving tickers (those with valid price data), not the original list
+        surviving_tickers = list(prices.columns) if not prices.empty else tickers
+        if not surviving_tickers:
+            surviving_tickers = tickers
+        n = len(surviving_tickers)
+        return {t: 1.0 / n for t in surviving_tickers}
 
     optimizer = PortfolioOptimizer(prices)
 

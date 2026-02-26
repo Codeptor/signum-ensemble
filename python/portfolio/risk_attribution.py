@@ -1,10 +1,13 @@
 """Risk attribution: decomposition, marginal contribution, and risk parity."""
 
+import logging
 from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
+
+logger = logging.getLogger(__name__)
 
 
 class RiskAttribution:
@@ -155,7 +158,9 @@ class RiskAttribution:
         )
 
         if not result.success:
-            raise RuntimeError(f"Risk parity optimization failed: {result.message}")
+            logger.error(f"Risk parity optimization failed: {result.message}")
+            logger.info("Falling back to equal weights")
+            return pd.Series([1.0 / n] * n, index=self.tickers)
 
         return pd.Series(result.x, index=self.tickers)
 
