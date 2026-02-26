@@ -121,11 +121,18 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
 
     H2 fix: verifies each liquidation fill instead of fire-and-forget.
     """
-    try:
-        # Cancel all open orders first
-        broker.cancel_all_orders()
-    except Exception as e:
-        logger.warning(f"Could not cancel open orders during liquidation: {e}")
+    # H-LIQRACE fix: retry cancel to prevent GTC stops racing with market sells
+    for attempt in range(3):
+        try:
+            broker.cancel_all_orders()
+            break
+        except Exception as e:
+            logger.warning(
+                f"Could not cancel open orders during liquidation "
+                f"(attempt {attempt + 1}/3): {e}"
+            )
+            if attempt < 2:
+                time.sleep(1)
 
     positions = broker.list_positions()
     if not positions:
@@ -253,10 +260,25 @@ def _verify_order_fill(
     except Exception as e:
         logger.error(f"  Failed to cancel timed-out order {order_id}: {e}")
 
+    # H-TIMEOUT fix: after cancel, re-query to capture any partial fill qty
+    final_qty = 0.0
+    final_price = None
+    try:
+        final_order = broker.get_order(order_id)
+        if final_order and final_order.filled_qty is not None:
+            final_qty = float(final_order.filled_qty)
+            final_price = final_order.filled_avg_price
+            if final_qty > 0:
+                logger.info(
+                    f"  Timeout order had partial fill: {final_qty:.4f} {symbol} @ {final_price}"
+                )
+    except Exception:
+        pass  # Best effort — default to 0
+
     return {
         "status": "timeout",
-        "filled_qty": 0,
-        "filled_avg_price": None,
+        "filled_qty": final_qty,
+        "filled_avg_price": final_price,
         "symbol": symbol,
         "order_id": order_id,
     }
@@ -548,9 +570,12 @@ def run_trading_cycle(
         logger.info(f"  {ticker}: {w:.2%}")
 
     # Apply regime-based exposure adjustment (Phase 2: Risk Management)
+    # H-CAUTION fix: track whether caution mode is active to prevent renorm undoing it
+    in_caution_mode = False
     if regime_detector is not None and regime_state is not None:
         if regime_state.regime == "caution":
             target_weights = regime_detector.adjust_weights(target_weights, regime_state.regime)
+            in_caution_mode = True
             logger.info(
                 f"Regime-adjusted weights ({regime_state.regime}, "
                 f"{regime_state.exposure_multiplier:.0%} exposure):"
@@ -567,15 +592,27 @@ def run_trading_cycle(
     if failed_tickers:
         logger.warning(f"Removing tickers with no price data: {failed_tickers}")
         target_weights = {t: w for t, w in target_weights.items() if t in prices}
-        # Renormalize, then clamp to MAX_POSITION_WEIGHT (M2 fix)
-        total = sum(target_weights.values())
-        if total > 0:
-            target_weights = {t: w / total for t, w in target_weights.items()}
-            # M2 fix: renormalization can push individual weights above the cap
-            clamped = {t: min(w, MAX_POSITION_WEIGHT) for t, w in target_weights.items()}
-            if clamped != target_weights:
-                logger.info("Clamped renormalized weights to MAX_POSITION_WEIGHT")
-                target_weights = clamped
+
+        # H-CAUTION fix: skip renormalization when in caution mode
+        # (renorming to 1.0 would undo the 50% exposure reduction)
+        if not in_caution_mode:
+            # H-CLAMP fix: iterative renorm-clamp loop to maintain sum-to-1
+            # while respecting MAX_POSITION_WEIGHT cap
+            total = sum(target_weights.values())
+            if total > 0:
+                for _ in range(10):  # Max 10 iterations, converges in 2-3
+                    target_weights = {t: w / total for t, w in target_weights.items()}
+                    clamped = {
+                        t: min(w, MAX_POSITION_WEIGHT) for t, w in target_weights.items()
+                    }
+                    total = sum(clamped.values())
+                    if abs(total - 1.0) < 1e-6:
+                        target_weights = clamped
+                        break
+                    target_weights = clamped
+                else:
+                    logger.info("Renorm-clamp loop: converged after max iterations")
+                    target_weights = clamped
 
     if not target_weights:
         logger.error("No tradeable tickers remaining — skipping cycle")
@@ -678,6 +715,22 @@ def run_trading_cycle(
 
         if status == "filled" or status == "partially_filled":
             actual_qty = float(result["filled_qty"])
+
+            # H-PARTIAL fix: re-query broker for authoritative filled_qty
+            # to reconcile partial fills that may have completed after our poll
+            try:
+                final_order = broker.get_order(entry["order_id"])
+                if final_order and final_order.filled_qty is not None:
+                    broker_qty = float(final_order.filled_qty)
+                    if abs(broker_qty - actual_qty) > 1e-6:
+                        logger.info(
+                            f"  Reconciled fill qty for {entry['symbol']}: "
+                            f"{actual_qty:.4f} -> {broker_qty:.4f}"
+                        )
+                        actual_qty = broker_qty
+            except Exception as e:
+                logger.warning(f"  Could not reconcile fill for {entry['symbol']}: {e}")
+
             if status == "filled":
                 filled_count += 1
                 logger.info(f"  FILLED: {entry['side'].upper()} {actual_qty:.4f} {entry['symbol']}")

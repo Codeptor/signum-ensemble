@@ -24,13 +24,19 @@ class TestVerifyOrderFillTimeout:
 
     @patch("time.sleep", return_value=None)
     def test_timeout_when_order_stays_open(self, _sleep):
-        """Order that never reaches terminal state returns 'timeout'."""
+        """Order that never reaches terminal state returns 'timeout'.
+
+        H-TIMEOUT fix: after cancel, re-queries broker for partial fill qty.
+        If the order had no fills, filled_qty should be 0.
+        """
         from examples.live_bot import _verify_order_fill
 
-        # Create a mock broker where get_order always returns 'new'
+        # Create a mock broker where get_order always returns 'new' with no fills
         mock_broker = MagicMock()
         mock_order = MagicMock()
         mock_order.status = "new"
+        mock_order.filled_qty = None  # No fills occurred
+        mock_order.filled_avg_price = None
         mock_broker.get_order.return_value = mock_order
 
         result = _verify_order_fill(mock_broker, "order-stuck", "AAPL", 10.0)
@@ -47,11 +53,12 @@ class TestVerifyOrderFillTimeout:
         from examples.live_bot import _verify_order_fill
 
         mock_broker = MagicMock()
-        mock_broker.get_order.return_value = None
+        mock_broker.get_order.return_value = None  # None has no filled_qty
 
         result = _verify_order_fill(mock_broker, "order-ghost", "MSFT", 5.0)
 
         assert result["status"] == "timeout"
+        # H-TIMEOUT: re-query returns None, so filled_qty defaults to 0
         assert result["filled_qty"] == 0
 
     @patch("time.sleep", return_value=None)

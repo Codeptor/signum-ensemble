@@ -174,9 +174,6 @@ class ExecutionBridge:
         # Validate through risk manager
         if self.risk_manager is not None:
             # C6 fix: calculate TARGET POSITION weight, not trade size weight.
-            # Previously passed trade size as weight, making all risk checks
-            # ineffective (e.g. a 5% top-up would pass the 30% position limit
-            # even if the resulting position was 35%).
             portfolio_value = self.equity
             if portfolio_value > 0:
                 existing_pos = self.get_position(ticker)
@@ -189,15 +186,20 @@ class ExecutionBridge:
             else:
                 weight = 0
 
-            can_execute, issues = self.risk_manager.can_execute_trade(
-                ticker=ticker,
-                new_weight=weight,
-                current_date=current_date,
-            )
+            # H-STALE fix: bypass risk check for position closes (target weight ~0)
+            # Closing stale positions should never be blocked by risk limits.
+            is_closing = abs(weight) < 1e-6
 
-            if not can_execute:
-                logger.warning(f"Order rejected for {ticker}: {issues}")
-                return None
+            if not is_closing:
+                can_execute, issues = self.risk_manager.can_execute_trade(
+                    ticker=ticker,
+                    new_weight=weight,
+                    current_date=current_date,
+                )
+
+                if not can_execute:
+                    logger.warning(f"Order rejected for {ticker}: {issues}")
+                    return None
 
         # Create order
         order = Order(
@@ -242,10 +244,11 @@ class ExecutionBridge:
             current_pos = self.get_position(order.ticker) if hasattr(self, 'positions') else None
             current_qty = current_pos.quantity if current_pos else 0
             if order.quantity > current_qty:
-                # This sell would open a short — need margin/cash for it
+                # H-SHORT fix: short sells need margin — compare against equity
+                # (not cash) since margin is based on total portfolio value
                 short_value = (order.quantity - current_qty) * current_price
-                if short_value + commission > self.cash:
-                    logger.warning(f"Insufficient cash for {order.ticker} short sell")
+                if short_value + commission > self.equity:
+                    logger.warning(f"Insufficient equity for {order.ticker} short sell")
                     return None
 
         fill = Fill(
@@ -297,8 +300,10 @@ class ExecutionBridge:
         # Record equity curve point (M6 fix: cap at 10k entries to prevent unbounded growth)
         self.equity_curve.append({"timestamp": datetime.now(), "equity": self.equity})
         if len(self.equity_curve) > 10_000:
-            # Keep every 10th historical point + last 1000
-            self.equity_curve = self.equity_curve[::10][:-100] + self.equity_curve[-1000:]
+            # H-EQCURVE fix: non-overlapping compaction — subsample old, keep recent
+            historical = self.equity_curve[:-1000][::10]
+            recent = self.equity_curve[-1000:]
+            self.equity_curve = historical + recent
 
     def update_prices(self, prices: Dict[str, float]) -> None:
         """Update positions with current prices."""

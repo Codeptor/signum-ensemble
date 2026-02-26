@@ -116,9 +116,10 @@ class AlpacaBroker(BaseBroker):
         prevents minute-boundary races (C5 fix) where a retry at :00 would
         generate a different ID than the original at :59.
         """
-        from datetime import date
+        from datetime import datetime, timezone
 
-        day_str = date.today().isoformat()
+        # H-IDTZ fix: use UTC date so client_order_id matches _has_traded_today's UTC
+        day_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         raw = f"{order.symbol}|{order.side}|{order.qty}|{order.order_type}|{day_str}"
         return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
@@ -404,13 +405,20 @@ class AlpacaBroker(BaseBroker):
         prices: Dict[str, float] = {}
         missing: list[str] = []
 
-        # Try Alpaca for each symbol individually
-        for sym in symbols:
-            try:
-                trade = self.api.get_latest_trade(sym)
+        # H-PRICES fix: use Alpaca's batch API instead of per-symbol calls
+        try:
+            trades = self.api.get_latest_trades(symbols)
+            for sym, trade in trades.items():
                 prices[sym] = float(trade.price)
-            except Exception:
-                missing.append(sym)
+            missing = [s for s in symbols if s not in prices]
+        except Exception:
+            # Fallback: try per-symbol if batch API fails
+            for sym in symbols:
+                try:
+                    trade = self.api.get_latest_trade(sym)
+                    prices[sym] = float(trade.price)
+                except Exception:
+                    missing.append(sym)
 
         # Batch fallback to yfinance for any Alpaca misses
         if missing:

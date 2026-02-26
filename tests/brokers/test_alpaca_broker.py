@@ -341,15 +341,17 @@ class TestClientOrderIdIdempotency:
 
         order = BrokerOrder(symbol="AAPL", side="buy", qty=10, order_type="market")
 
-        # Patch date.today() at the module level where it's imported
-        fake_date_1 = MagicMock(wraps=real_date)
-        fake_date_1.today.return_value = real_date(2026, 1, 1)
-        fake_date_2 = MagicMock(wraps=real_date)
-        fake_date_2.today.return_value = real_date(2026, 1, 2)
+        # H-IDTZ fix: code now uses datetime.now(timezone.utc), patch datetime
+        from datetime import datetime as real_datetime, timezone
 
-        with patch("datetime.date", fake_date_1):
+        fake_dt_1 = MagicMock(wraps=real_datetime)
+        fake_dt_1.now.return_value = real_datetime(2026, 1, 1, tzinfo=timezone.utc)
+        fake_dt_2 = MagicMock(wraps=real_datetime)
+        fake_dt_2.now.return_value = real_datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+        with patch("datetime.datetime", fake_dt_1):
             id1 = AlpacaBroker._make_client_order_id(order)
-        with patch("datetime.date", fake_date_2):
+        with patch("datetime.datetime", fake_dt_2):
             id2 = AlpacaBroker._make_client_order_id(order)
         assert id1 != id2
 
@@ -663,7 +665,11 @@ class TestGetLatestPrice:
 class TestGetLatestPrices:
     def test_all_from_alpaca(self, broker):
         b, mock_rest = broker
-        mock_rest.get_latest_trade.return_value = _make_alpaca_trade(price=200.0)
+        # H-PRICES fix: now uses batch get_latest_trades API
+        mock_rest.get_latest_trades.return_value = {
+            "AAPL": _make_alpaca_trade(price=200.0),
+            "MSFT": _make_alpaca_trade(price=200.0),
+        }
 
         prices = b.get_latest_prices(["AAPL", "MSFT"])
         assert len(prices) == 2
@@ -673,12 +679,10 @@ class TestGetLatestPrices:
     def test_partial_alpaca_miss_yfinance_fallback(self, broker):
         b, mock_rest = broker
 
-        def side_effect(sym):
-            if sym == "AAPL":
-                return _make_alpaca_trade(price=200.0)
-            raise Exception("no data")
-
-        mock_rest.get_latest_trade.side_effect = side_effect
+        # H-PRICES fix: batch API returns only AAPL
+        mock_rest.get_latest_trades.return_value = {
+            "AAPL": _make_alpaca_trade(price=200.0),
+        }
 
         # yfinance is imported locally inside get_latest_prices as
         # ``import yfinance as yf``, so we must patch at the yfinance

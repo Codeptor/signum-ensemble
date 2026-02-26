@@ -3,10 +3,13 @@
 Defines the contract that all broker implementations must follow.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -204,7 +207,7 @@ class BaseBroker(ABC):
                     order_id = self.submit_order(order)
                     order_ids.append(order_id)
                 except Exception as e:
-                    print(f"Failed to close stale position {symbol}: {e}")
+                    logger.error(f"Failed to close stale position {symbol}: {e}")
 
         for symbol, target_weight in target_weights.items():
             if target_weight < 0:
@@ -230,6 +233,6 @@ class BaseBroker(ABC):
                     order_id = self.submit_order(order)
                     order_ids.append(order_id)
                 except Exception as e:
-                    print(f"Failed to submit order for {symbol}: {e}")
+                    logger.error(f"Failed to submit order for {symbol}: {e}")
 
         return order_ids
