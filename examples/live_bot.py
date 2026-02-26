@@ -12,6 +12,7 @@ Schedule: run daily ~15 min before market close, or keep running in a loop.
 """
 
 import logging
+import logging.handlers
 import os
 import sys
 import time
@@ -25,13 +26,23 @@ from python.brokers.alpaca_broker import AlpacaBroker
 from python.brokers.base import BrokerOrder
 from python.portfolio.risk_manager import RiskLimits, RiskManager
 
+# --- Logging with rotation (Fix #36) ---
+_log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(_log_formatter)
+
+# Rotate at 10 MB, keep 5 backups (≈50 MB max disk)
+_file_handler = logging.handlers.RotatingFileHandler(
+    "live_bot.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+)
+_file_handler.setFormatter(_log_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("live_bot.log"),
-    ],
+    handlers=[_console_handler, _file_handler],
 )
 logger = logging.getLogger("LiveBot")
 
@@ -48,6 +59,34 @@ SLEEP_MARKET_CLOSED_HOURS = 1
 ORDER_POLL_INTERVAL_SECS = 2  # How often to poll for fill status
 ORDER_POLL_TIMEOUT_SECS = 60  # Max time to wait for a fill
 TERMINAL_ORDER_STATES = {"filled", "canceled", "cancelled", "expired", "rejected"}
+
+# --- Alerting (Fix #37) ---
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord/generic webhook
+
+
+def _send_alert(message: str) -> None:
+    """Fire-and-forget alert to a webhook URL (Slack/Discord/custom).
+
+    Does nothing if ALERT_WEBHOOK_URL is not set.  Never raises — alerting
+    failures must not mask the original error.
+    """
+    if not ALERT_WEBHOOK_URL:
+        return
+    try:
+        import json
+        import urllib.request
+
+        payload = json.dumps({"text": message}).encode("utf-8")
+        req = urllib.request.Request(
+            ALERT_WEBHOOK_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        # Swallow — alerting must never crash the crash handler
+        logger.debug("Failed to send alert webhook", exc_info=True)
 
 
 def _verify_order_fill(
@@ -543,6 +582,7 @@ def main():
         logger.info("Bot stopped by user (Ctrl+C).")
     except Exception as e:
         logger.error(f"Fatal error in bot loop: {e}", exc_info=True)
+        _send_alert(f"[LiveBot FATAL] Bot crashed at {datetime.now().isoformat()}: {e}")
     finally:
         broker.disconnect()
         logger.info("Bot shutdown complete.")

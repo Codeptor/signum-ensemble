@@ -3198,6 +3198,7 @@ dependencies = [
     { name = "plotly" },
     { name = "scikit-learn" },
     { name = "sqlalchemy" },
+    { name = "tenacity" },
     { name = "yfinance" },
 ]
 
@@ -3274,6 +3275,7 @@ requires-dist = [
     { name = "shap", marker = "extra == 'monitoring'", specifier = ">=0.43" },
     { name = "skfolio", marker = "extra == 'portfolio'", specifier = ">=0.4" },
     { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "tenacity", specifier = ">=8.2" },
     { name = "torch", marker = "extra == 'ml'", specifier = ">=2.1" },
     { name = "yfinance", specifier = ">=0.2" },
 ]
