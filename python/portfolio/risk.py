@@ -14,7 +14,7 @@ class RiskEngine:
         self,
         returns: pd.DataFrame,
         weights: pd.Series,
-        rf_rate: float = 0.02,
+        rf_rate: float = 0.05,
         benchmark_returns: Optional[pd.Series] = None,
     ):
         """
@@ -207,7 +207,8 @@ class RiskEngine:
 
         active_returns = self.portfolio_returns - benchmark_returns
         tracking_error = active_returns.std() * np.sqrt(self.ann_factor)
-        active_return = active_returns.mean() * self.ann_factor
+        # R3-R-4 fix: geometric annualization consistent with sharpe_ratio()
+        active_return = (1 + active_returns.mean()) ** self.ann_factor - 1
 
         return active_return / tracking_error if tracking_error > 0 else 0.0
 
@@ -223,7 +224,9 @@ class RiskEngine:
         excess = self.portfolio_returns - risk_free / self.ann_factor
         rolling_mean = excess.rolling(window).mean() * self.ann_factor
         rolling_std = excess.rolling(window).std() * np.sqrt(self.ann_factor)
-        return rolling_mean / rolling_std
+        # R3-R-5 fix: guard against division by zero when rolling std is 0
+        result = rolling_mean / rolling_std
+        return result.replace([np.inf, -np.inf], 0.0)
 
     def rolling_var(self, window: int = 63, confidence: float = 0.95) -> pd.Series:
         """Rolling historical VaR."""

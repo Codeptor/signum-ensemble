@@ -425,6 +425,8 @@ def monte_carlo_resampling(
 
 def regime_stress_tests(returns: pd.Series, periods_per_year: float = 252 / 5) -> dict:
     """Calculate performance metrics across predefined historical regimes."""
+    # Avoid mutating the caller's index
+    returns = returns.copy()
     # Ensure datetime index
     returns.index = pd.to_datetime(returns.index)
 

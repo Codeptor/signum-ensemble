@@ -104,7 +104,7 @@ def compute_regime_metrics(
     regime: str,
     start_date: str,
     end_date: str,
-    risk_free_rate: float = 0.04,
+    risk_free_rate: float = 0.05,
 ) -> RegimeResult:
     """Compute performance metrics for a returns series within a regime.
 
@@ -170,7 +170,7 @@ def compute_regime_metrics(
 def backtest_by_regime(
     strategy_returns: pd.Series,
     regimes: Optional[dict[str, tuple[str, str]]] = None,
-    risk_free_rate: float = 0.04,
+    risk_free_rate: float = 0.05,
 ) -> RegimeAnalysis:
     """Evaluate strategy returns across market regimes.
 

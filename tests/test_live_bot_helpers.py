@@ -517,22 +517,30 @@ class TestVerifyOrderFillPartialFill:
 
     @patch("time.sleep", return_value=None)
     def test_partial_fill_uses_actual_filled_qty(self, _sleep):
-        """Partial fills should return actual filled_qty, not expected."""
+        """partially_filled is NOT terminal — loop times out, cancel captures partial qty.
+
+        R3-E-16: partially_filled means the order is still active (may get more
+        fills).  The timeout+cancel path re-queries the broker to capture the
+        actual filled quantity.
+        """
         from examples.live_bot import _verify_order_fill
 
         mock_broker = MagicMock()
-        order = MagicMock()
-        order.status = "partially_filled"
-        order.qty = 100.0
-        order.filled_qty = 42.0
-        order.filled_avg_price = 155.50
-        mock_broker.get_order.return_value = order
+        # During polling, order stays partially_filled (not terminal)
+        poll_order = MagicMock()
+        poll_order.status = "partially_filled"
+        poll_order.qty = 100.0
+        poll_order.filled_qty = 42.0
+        poll_order.filled_avg_price = 155.50
+        mock_broker.get_order.return_value = poll_order
 
         result = _verify_order_fill(mock_broker, "order-partial", "AAPL", 100.0)
 
-        assert result["status"] == "partially_filled"
+        # Times out and cancels, then re-queries to capture partial fill
+        assert result["status"] == "timeout"
         assert result["filled_qty"] == 42.0
         assert result["filled_avg_price"] == 155.50
+        mock_broker.cancel_order.assert_called_once_with("order-partial")
 
     @patch("time.sleep", return_value=None)
     def test_timeout_cancels_order(self, _sleep):
@@ -868,17 +876,17 @@ class TestHasTradedToday:
         assert _has_traded_today(mock_broker) is True
 
     def test_yesterday_orders_not_counted(self):
-        """Orders from yesterday should not count as traded today."""
+        """Orders from yesterday should not count as traded today.
+
+        R3-E-13: _has_traded_today now uses ``after`` param to scope the
+        query server-side, so the mock should return empty when ``after``
+        is today (simulating Alpaca filtering out yesterday's orders).
+        """
         from examples.live_bot import _has_traded_today
 
         mock_broker = MagicMock()
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-
-        order = MagicMock()
-        order.status = "filled"
-        order.order_id = "ord-3"
-        order.created_at = f"{yesterday}T14:30:00Z"
-        mock_broker.list_orders.return_value = [order]
+        # Simulate server-side filtering: no orders returned for today's window
+        mock_broker.list_orders.return_value = []
 
         assert _has_traded_today(mock_broker) is False
 

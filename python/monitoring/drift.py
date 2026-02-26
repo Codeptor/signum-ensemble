@@ -25,6 +25,16 @@ class DriftDetector:
             ref_vals = self.reference[col].dropna()
             cur_vals = current[col].dropna()
 
+            # R3-P-7 fix: guard against empty Series after dropna
+            if len(ref_vals) < 2 or len(cur_vals) < 2:
+                report[col] = {
+                    "ks_statistic": 0.0,
+                    "p_value": 1.0,
+                    "psi": 0.0,
+                    "drifted": False,
+                }
+                continue
+
             ks_stat, p_value = stats.ks_2samp(ref_vals, cur_vals)
             psi = self._psi(ref_vals, cur_vals)
 

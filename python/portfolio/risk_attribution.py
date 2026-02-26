@@ -46,7 +46,7 @@ class RiskAttribution:
     def _portfolio_volatility(self) -> float:
         """Calculate portfolio volatility from weights and covariance."""
         port_var = self.weights @ self.cov_matrix @ self.weights
-        return float(np.sqrt(port_var))
+        return float(np.sqrt(max(port_var, 0.0)))
 
     def marginal_risk_contribution(self) -> pd.Series:
         """

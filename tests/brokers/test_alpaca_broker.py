@@ -584,7 +584,7 @@ class TestGetOrder:
         orders = b.list_orders(status="open")
         assert len(orders) == 2
         assert all(isinstance(o, BrokerOrder) for o in orders)
-        mock_rest.list_orders.assert_called_once_with(status="open")
+        mock_rest.list_orders.assert_called_once_with(status="open", limit=500)
 
     def test_list_orders_failure_returns_empty(self, broker):
         b, mock_rest = broker

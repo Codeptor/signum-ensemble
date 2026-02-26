@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import random
+import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,9 @@ from python.alpha.features import (
     FEATURE_NEUTRAL_DEFAULTS,
     compute_alpha_features,
     compute_cross_sectional_features,
+    compute_winsorize_bounds,
+    load_winsorize_bounds,
+    save_winsorize_bounds,
 )
 from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
@@ -27,6 +31,7 @@ from python.data.ingestion import (
     reshape_ohlcv_wide_to_long,
 )
 from python.data.sectors import enforce_sector_constraints, get_sector_map
+from python.monitoring.drift import DriftDetector
 from python.portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
@@ -46,12 +51,17 @@ MIN_HISTORY_DAYS = "1y"
 # training data (~500 dates × 500 tickers = 250k samples).
 TRAINING_LOOKBACK = "2y"
 
-# Model cache directory
-MODEL_CACHE_DIR = Path("data/models")
+# R3-P-9/P-10 fix: resolve paths relative to project root, not CWD
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+MODEL_CACHE_DIR = _PROJECT_ROOT / "data" / "models"
 MODEL_CACHE_FILE = MODEL_CACHE_DIR / "latest_model.joblib"
+FEATURE_REFERENCE_FILE = MODEL_CACHE_DIR / "feature_reference.parquet"
 
 # Model versioning — keep last N versions (Fix #45)
 MAX_MODEL_VERSIONS = 10
+
+# R3-P-8 fix: module-level storage for last drift report (replaces function attribute)
+_last_drift_report: dict | None = None
 
 
 def _load_cached_model() -> CrossSectionalModel | None:
@@ -64,7 +74,15 @@ def _load_cached_model() -> CrossSectionalModel | None:
         trained_date = cached.get("trained_date")
         model = cached.get("model")
 
-        if trained_date == date.today().isoformat() and model is not None:
+        # R3-P-14 fix: use NY timezone for staleness check (market-day aligned)
+        from zoneinfo import ZoneInfo
+
+        today_ny = date.today()  # fallback
+        try:
+            today_ny = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        except Exception:
+            pass
+        if trained_date == today_ny.isoformat() and model is not None:
             logger.info(f"Loaded cached model from {MODEL_CACHE_FILE} (trained {trained_date})")
             return model
 
@@ -86,7 +104,13 @@ def _save_model_cache(model: CrossSectionalModel) -> None:
     are trained on the same day.
     """
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    today = date.today().isoformat()
+    # R3-P-14 fix: use NY timezone for staleness key
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+
+        today = datetime.now(tz=_ZI("America/New_York")).date().isoformat()
+    except Exception:
+        today = date.today().isoformat()
     now_iso = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
     # Deterministic short hash from model params + timestamp for uniqueness
@@ -125,6 +149,100 @@ def _prune_old_versions() -> None:
     for old in versions[MAX_MODEL_VERSIONS:]:
         old.unlink()
         logger.info(f"Pruned old model version: {old.name}")
+
+
+def _save_feature_reference(featured_df: pd.DataFrame, feature_cols: list[str]) -> None:
+    """Save a random sample of training features as the drift detection reference.
+
+    Stores a parquet file with the feature columns from the training data.
+    A sample of up to 5000 rows is saved to keep file size reasonable while
+    preserving distributional properties.
+    """
+    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    available = [c for c in feature_cols if c in featured_df.columns]
+    if not available:
+        logger.warning("No feature columns found for drift reference — skipping save")
+        return
+
+    ref = featured_df[available].dropna()
+    if len(ref) > 5000:
+        ref = ref.sample(n=5000, random_state=42)
+    ref.to_parquet(FEATURE_REFERENCE_FILE)
+    logger.info(f"Saved feature reference ({len(ref)} rows, {len(available)} features)")
+
+
+def _load_feature_reference() -> pd.DataFrame | None:
+    """Load the saved feature reference for drift detection."""
+    if not FEATURE_REFERENCE_FILE.exists():
+        return None
+    try:
+        return pd.read_parquet(FEATURE_REFERENCE_FILE)
+    except Exception as e:
+        logger.warning(f"Failed to load feature reference: {e}")
+        return None
+
+
+def check_feature_drift(
+    current_features: pd.DataFrame,
+    feature_cols: list[str] | None = None,
+    threshold: float = 0.01,
+) -> dict | None:
+    """Compare current inference features against training reference.
+
+    Args:
+        current_features: DataFrame of features computed at inference time.
+        feature_cols: Subset of columns to check. If None, checks all
+            columns present in both reference and current data.
+        threshold: KS-test p-value threshold for declaring drift (default 0.01).
+
+    Returns:
+        Drift report dict from ``DriftDetector.detect()``, or None if no
+        reference is available.  The report maps feature names to dicts with
+        keys: ks_statistic, p_value, psi, drifted.
+    """
+    reference = _load_feature_reference()
+    if reference is None:
+        logger.info("No feature reference available — skipping drift check")
+        return None
+
+    # Restrict to requested feature columns
+    if feature_cols:
+        cols = [c for c in feature_cols if c in reference.columns and c in current_features.columns]
+    else:
+        cols = [c for c in reference.columns if c in current_features.columns]
+
+    if not cols:
+        logger.warning("No overlapping feature columns for drift check")
+        return None
+
+    detector = DriftDetector(reference[cols], threshold=threshold)
+
+    # R3-P-3 fix: compare only the latest date's cross-section against training.
+    # The featured DataFrame has a DatetimeIndex with duplicate dates (one per ticker).
+    # Using all rows would compare training data against itself (1yr overlap with 2yr training).
+    latest_date = current_features.index.max()
+    current_slice = current_features.loc[latest_date][cols].dropna()
+    # If loc returns a Series (single row), reshape to DataFrame
+    if isinstance(current_slice, pd.Series):
+        current_slice = current_slice.to_frame().T
+
+    if len(current_slice) < 10:
+        logger.warning(f"Too few rows ({len(current_slice)}) for meaningful drift detection")
+        return None
+
+    report = detector.detect(current_slice)
+    drifted = [k for k, v in report.items() if v["drifted"]]
+    if drifted:
+        logger.warning(f"Feature drift detected in {len(drifted)}/{len(cols)} features: {drifted}")
+        for feat in drifted:
+            r = report[feat]
+            logger.warning(
+                f"  {feat}: KS={r['ks_statistic']:.3f}, p={r['p_value']:.4f}, PSI={r['psi']:.3f}"
+            )
+    else:
+        logger.info(f"No feature drift detected ({len(cols)} features checked)")
+
+    return report
 
 
 def list_model_versions() -> list[dict]:
@@ -206,8 +324,16 @@ def compute_features(long_df: pd.DataFrame) -> pd.DataFrame:
 
     Includes macro features (VIX, term spread) when the data file exists,
     so that inference-time features match what the model was trained on.
+
+    R3-P-2 fix: loads saved winsorize bounds from training so inference
+    uses identical clipping thresholds (C-WINS fix wiring).
     """
-    featured = compute_alpha_features(long_df)
+    # Load training-time winsorize bounds for consistent feature distributions
+    bounds = load_winsorize_bounds()
+    if bounds:
+        logger.info(f"Using saved winsorize bounds ({len(bounds)} cols) for inference")
+
+    featured = compute_alpha_features(long_df, winsorize_bounds=bounds)
     featured = compute_cross_sectional_features(featured)
 
     # Merge macro features at inference time (same as train_model does)
@@ -275,6 +401,9 @@ def train_model(
         raw = fetch_ohlcv(tickers, period=TRAINING_LOOKBACK)
         long = reshape_ohlcv_wide_to_long(raw)
 
+    # R3-P-2 fix: compute winsorize bounds from training data and save them.
+    # First pass: compute features without bounds to get the raw distributions,
+    # then compute bounds from training split, save, and re-apply.
     featured = compute_alpha_features(long)
     featured = compute_cross_sectional_features(featured)
 
@@ -287,6 +416,12 @@ def train_model(
             featured = merge_macro_features(featured, str(macro_path))
         except Exception as e:
             logger.warning(f"Could not merge macro features: {e}")
+
+    # Compute and save winsorize bounds from the full training data
+    # so inference uses identical clipping thresholds (C-WINS fix)
+    bounds = compute_winsorize_bounds(featured)
+    save_winsorize_bounds(bounds)
+    logger.info(f"Saved winsorize bounds ({len(bounds)} cols) for inference consistency")
 
     labeled = compute_forward_returns(featured, horizon=5)
     labeled = compute_residual_target(labeled, horizon=5)
@@ -315,6 +450,7 @@ def train_model(
     )
 
     model = CrossSectionalModel(model_type="lightgbm", feature_cols=available_cols)
+    ic = None
 
     if len(val_data) > 0:
         model.fit(train_data, target_col="target_5d", val_df=val_data)
@@ -326,8 +462,39 @@ def train_model(
         logger.warning("No validation data available — training without early stopping")
         model.fit(train_data, target_col="target_5d")
 
-    # Cache the trained model
+    # --- MLflow tracking (best-effort: never crash training) ---
+    try:
+        import mlflow
+
+        with mlflow.start_run(run_name="live_lgbm_alpha"):
+            mlflow.log_params(model.params)
+            mlflow.log_metric("train_size", len(train_data))
+            mlflow.log_metric("val_size", len(val_data))
+            mlflow.log_metric("feature_count", len(available_cols))
+            if ic is not None:
+                mlflow.log_metric("validation_ic", float(ic))
+            mlflow.log_param("trained_date", date.today().isoformat())
+            mlflow.log_param("feature_columns", json.dumps(available_cols))
+
+            # Log feature importance as artifact
+            try:
+                importance = model.feature_importance()
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".csv", delete=False, prefix="feat_importance_"
+                ) as f:
+                    importance.to_csv(f)
+                    f.flush()
+                    mlflow.log_artifact(f.name, artifact_path="feature_importance")
+            except Exception as e:
+                logger.debug(f"Could not log feature importance artifact: {e}")
+
+        logger.info("MLflow run logged successfully for live_lgbm_alpha")
+    except Exception as e:
+        logger.warning(f"MLflow tracking failed (training unaffected): {e}")
+
+    # Cache the trained model and save feature reference for drift detection
     _save_model_cache(model)
+    _save_feature_reference(train_data, available_cols)
 
     return model
 
@@ -449,6 +616,15 @@ def optimize_weights(
         raw = fetch_ohlcv(tickers, period=period)
     prices = extract_close_prices(raw)
 
+    # R3-P-1 fix: filter to only the selected tickers.
+    # When price_data contains the full 500-ticker universe (H11 reuse),
+    # we must restrict to just the top-N tickers passed in `tickers`.
+    available_tickers = [t for t in tickers if t in prices.columns]
+    if available_tickers:
+        prices = prices[available_tickers]
+    else:
+        logger.warning("None of the selected tickers found in price data")
+
     # Drop columns (tickers) with too many NaNs
     prices = prices.dropna(axis=1, thresh=int(len(prices) * 0.8))
     prices = prices.dropna()
@@ -551,9 +727,32 @@ def get_ml_weights(
         logger.warning(f"Dropped {len(dropped)} tickers with insufficient history: {dropped}")
     universe_data = universe_data[universe_data["ticker"].isin(valid_tickers)]
 
-    # Step 3: Compute features and rank
+    # Step 3: Compute features, check drift, and rank
     logger.info("Step 3/4: Computing features and ranking stocks...")
     featured = compute_features(universe_data)
+
+    # Drift detection: compare current features against training reference
+    drift_report = check_feature_drift(featured, feature_cols=model.feature_cols)
+    # R3-P-8 fix: store in module-level variable (not function attribute)
+    global _last_drift_report
+    _last_drift_report = drift_report
+
+    # Log drift metrics to MLflow (best-effort)
+    if drift_report:
+        try:
+            import mlflow
+
+            with mlflow.start_run(run_name="live_drift_check"):
+                drifted_features = [k for k, v in drift_report.items() if v["drifted"]]
+                psi_values = [v["psi"] for v in drift_report.values()]
+                mlflow.log_metric("n_drifted_features", len(drifted_features))
+                mlflow.log_metric("n_features_checked", len(drift_report))
+                mlflow.log_metric("max_psi", max(psi_values) if psi_values else 0.0)
+                if drifted_features:
+                    mlflow.log_param("drifted_features", json.dumps(drifted_features))
+        except Exception as e:
+            logger.warning(f"MLflow drift logging failed (non-fatal): {e}")
+
     top_tickers = rank_stocks(model, featured, top_n=top_n)
 
     if not top_tickers:

@@ -459,15 +459,14 @@ class RiskManager:
         # Update turnover
         self.daily_turnover[date_key] = self.daily_turnover.get(date_key, 0.0) + abs(weight_change)
 
-        # Update current weights — clamp to [0, 1] to prevent accidental
-        # negative (short) exposure from rounding or overshoot.
+        # Update current weights — allow negative for short positions.
+        # Previous version clamped to max(0, ...) which silently zeroed out
+        # short positions, corrupting leverage/sector/trade-size checks.
         if self.current_weights is not None:
             if ticker in self.current_weights.index:
-                self.current_weights[ticker] = max(
-                    0.0, self.current_weights[ticker] + weight_change
-                )
+                self.current_weights[ticker] = self.current_weights[ticker] + weight_change
             else:
-                self.current_weights[ticker] = max(0.0, weight_change)
+                self.current_weights[ticker] = weight_change
 
     def get_risk_summary(self) -> Dict:
         """Get summary of current risk status."""

@@ -113,6 +113,14 @@ class CrossSectionalModel:
         if self.model is None:
             raise ValueError("Model is not trained. Call fit() before predict().")
         features = df[self.feature_cols].values
+        # R3-P-15 fix: warn if NaN features are passed to model
+        nan_count = np.isnan(features).sum()
+        if nan_count > 0:
+            nan_pct = nan_count / features.size * 100
+            logger.warning(
+                f"R3-P-15: {nan_count} NaN values ({nan_pct:.1f}%) in features "
+                f"passed to {self.model_type}.predict(). Results may be unreliable."
+            )
         return self.model.predict(features).astype(np.float64)
 
     def predict_ranks(self, df: pd.DataFrame) -> pd.Series:

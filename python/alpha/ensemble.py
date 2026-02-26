@@ -1,12 +1,18 @@
 """Model ensemble for robust cross-sectional return predictions.
 
-Combines LightGBM, Random Forest, and Elastic Net with IC-weighted
-averaging to reduce variance and overfitting (Phase 3, §2.3.3).
+Combines LightGBM and Random Forest with IC-weighted averaging
+to reduce variance and overfitting (Phase 3, §2.3.3).
 
 Each sub-model captures different aspects of the signal:
   - LightGBM: Non-linear interactions (gradient boosting)
   - Random Forest: Robust to outliers (bagging)
-  - Elastic Net: Linear baseline, regularization prevents overfitting
+
+Note: Elastic Net was removed because features span ~12 orders of
+magnitude (RSI: 0-100, amihud_illiq: ~1e-12) and ElasticNet's L1/L2
+penalty is scale-sensitive. Without per-feature standardization the
+Elastic Net produced near-zero or garbage predictions. Since LightGBM
+and RF are scale-invariant, they don't need this fix. The ensemble
+is cleaner and more reliable as a 2-model combination.
 """
 
 import logging
@@ -15,7 +21,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import ElasticNet
 
 from python.alpha.model import DEFAULT_SEED, CrossSectionalModel
 
@@ -47,16 +52,14 @@ def _safe_ic(pred: np.ndarray, actual: np.ndarray) -> float:
 
 # Default ensemble weights (prior to IC-based calibration)
 DEFAULT_WEIGHTS = {
-    "lightgbm": 0.50,
-    "random_forest": 0.30,
-    "elastic_net": 0.20,
+    "lightgbm": 0.60,
+    "random_forest": 0.40,
 }
 
 
 class ModelEnsemble:
-    """Ensemble of LightGBM + Random Forest + Elastic Net.
+    """Ensemble of LightGBM + Random Forest.
 
-    The ensemble can use static weights (default) or dynamically compute
     IC-based weights from a validation set.
 
     Compatible with CrossSectionalModel interface (fit/predict on DataFrames).
@@ -72,7 +75,7 @@ class ModelEnsemble:
         Args:
             feature_cols: Feature column names used by all sub-models.
             weights: Optional dict of model_name -> weight. Defaults to
-                DEFAULT_WEIGHTS (50/30/20 split for lgbm/rf/enet).
+                DEFAULT_WEIGHTS (60/40 split for lgbm/rf).
         """
         self.feature_cols = feature_cols
         self.weights = dict(weights) if weights else dict(DEFAULT_WEIGHTS)
@@ -90,12 +93,6 @@ class ModelEnsemble:
             n_jobs=-1,
             random_state=DEFAULT_SEED,
         )
-        self.enet = ElasticNet(
-            alpha=0.001,
-            l1_ratio=0.5,
-            max_iter=2000,
-            random_state=DEFAULT_SEED,
-        )
 
     @property
     def models(self) -> dict[str, object]:
@@ -103,7 +100,6 @@ class ModelEnsemble:
         return {
             "lightgbm": self.lgbm,
             "random_forest": self.rf,
-            "elastic_net": self.enet,
         }
 
     def fit(
@@ -159,10 +155,6 @@ class ModelEnsemble:
         logger.info("  Training Random Forest...")
         self.rf.fit(X_clean, y_clean)
 
-        # 3. Elastic Net (sklearn interface — needs arrays)
-        logger.info("  Training Elastic Net...")
-        self.enet.fit(X_clean, y_clean)
-
         self._fitted = True
         logger.info("  Ensemble training complete")
 
@@ -190,7 +182,6 @@ class ModelEnsemble:
         preds = {
             "lightgbm": self.lgbm.predict(df),
             "random_forest": self.rf.predict(X),
-            "elastic_net": self.enet.predict(X),
         }
 
         ensemble_pred = sum(preds[name] * weight for name, weight in self.weights.items())
@@ -208,7 +199,6 @@ class ModelEnsemble:
         return {
             "lightgbm": self.lgbm.predict(df),
             "random_forest": self.rf.predict(X),
-            "elastic_net": self.enet.predict(X),
         }
 
     def calibrate_weights(
@@ -243,13 +233,12 @@ class ModelEnsemble:
         ics: dict[str, float] = {}
 
         # C-CORR fix: use _safe_ic instead of raw np.corrcoef to handle
-        # zero-variance predictions (e.g. Elastic Net returning a constant).
+        # zero-variance predictions.
         lgbm_pred = self.lgbm.predict(val_clean)
         ics["lightgbm"] = _safe_ic(lgbm_pred, y_clean)
 
         X_clean = X_val[mask]
         ics["random_forest"] = _safe_ic(self.rf.predict(X_clean), y_clean)
-        ics["elastic_net"] = _safe_ic(self.enet.predict(X_clean), y_clean)
 
         logger.info(f"  Individual model ICs: {ics}")
 
@@ -277,11 +266,9 @@ class ModelEnsemble:
         if self.lgbm.model is not None:
             result["lightgbm"] = self.lgbm.feature_importance().reindex(self.feature_cols).values
 
-        # Random Forest
-        result["random_forest"] = self.rf.feature_importances_
-
-        # Elastic Net (absolute coefficient magnitudes)
-        result["elastic_net"] = np.abs(self.enet.coef_)
+        # Random Forest (R3-P-11 fix: guard against unfitted model)
+        if hasattr(self.rf, "feature_importances_"):
+            result["random_forest"] = self.rf.feature_importances_
 
         # Weighted average importance
         result["ensemble"] = sum(

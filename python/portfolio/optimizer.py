@@ -69,14 +69,17 @@ class PortfolioOptimizer:
         self.current_weights = current_weights
         self.turnover_threshold = turnover_threshold
 
-        # H-HRP fix: apply Ledoit-Wolf shrinkage for small-sample covariance
+        # H-HRP fix: apply Ledoit-Wolf shrinkage for small-sample covariance.
+        # R3-O-1 fix: store the estimator so optimizer methods can use it.
         n_obs, n_assets = self.returns.shape
         self._shrunk = False
+        self._lw_estimator = None  # sklearn LedoitWolf estimator (if applied)
         if shrink_covariance and n_assets > 2 and n_obs < n_assets * 3:
             try:
                 from sklearn.covariance import LedoitWolf
 
                 lw = LedoitWolf().fit(self.returns.values)
+                self._lw_estimator = lw
                 logger.info(
                     f"H-HRP: applied Ledoit-Wolf shrinkage "
                     f"(n_obs={n_obs}, n_assets={n_assets}, shrinkage={lw.shrinkage_:.3f})"
@@ -85,10 +88,20 @@ class PortfolioOptimizer:
             except Exception as e:
                 logger.warning(f"Ledoit-Wolf shrinkage failed: {e}")
 
+    def _prior_estimator(self):
+        """Return an EmpiricalPrior with Ledoit-Wolf covariance if available (R3-O-1)."""
+        if self._lw_estimator is not None:
+            try:
+                return EmpiricalPrior(covariance_estimator=self._lw_estimator)
+            except Exception as e:
+                logger.warning(f"Could not create shrunk prior: {e}")
+        return EmpiricalPrior()
+
     def hrp(self) -> pd.Series:
         """Hierarchical Risk Parity allocation."""
         try:
-            model = HierarchicalRiskParity()
+            # R3-O-1 fix: inject Ledoit-Wolf covariance via prior_estimator
+            model = HierarchicalRiskParity(prior_estimator=self._prior_estimator())
             model.fit(self.returns)
             weights = pd.Series(model.weights_, index=self.tickers, name="hrp_weights")
         except Exception as e:
@@ -105,10 +118,12 @@ class PortfolioOptimizer:
     def min_cvar(self, confidence_level: float = 0.95) -> pd.Series:
         """Minimum CVaR (Conditional Value at Risk) allocation."""
         try:
+            # R3-O-1 fix: inject Ledoit-Wolf covariance via prior_estimator
             model = MeanRisk(
                 risk_measure=RiskMeasure.CVAR,
                 min_weights=0.0,
                 cvar_beta=confidence_level,
+                prior_estimator=self._prior_estimator(),
             )
             model.fit(self.returns)
             weights = pd.Series(model.weights_, index=self.tickers, name="min_cvar_weights")
@@ -152,10 +167,11 @@ class PortfolioOptimizer:
         ]
         confidence_array = [view_confidences[ticker] for ticker in views.index]
 
+        # R3-O-1 fix: inject Ledoit-Wolf covariance via prior_estimator
         prior_model = BlackLitterman(
             views=view_strings,
             view_confidences=confidence_array,
-            prior_estimator=EmpiricalPrior(),
+            prior_estimator=self._prior_estimator(),
         )
 
         try:
@@ -183,7 +199,11 @@ class PortfolioOptimizer:
     def risk_parity(self) -> pd.Series:
         """Equal risk contribution allocation via HRP with variance risk measure."""
         try:
-            model = HierarchicalRiskParity(risk_measure=RiskMeasure.VARIANCE)
+            # R3-O-1 fix: inject Ledoit-Wolf covariance via prior_estimator
+            model = HierarchicalRiskParity(
+                risk_measure=RiskMeasure.VARIANCE,
+                prior_estimator=self._prior_estimator(),
+            )
             model.fit(self.returns)
             weights = pd.Series(model.weights_, index=self.tickers, name="risk_parity_weights")
         except Exception as e:

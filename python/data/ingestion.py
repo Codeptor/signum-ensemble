@@ -128,13 +128,18 @@ def fetch_ohlcv(
             if df[t].isna().all().all():
                 all_nan_tickers.append(t)
         if all_nan_tickers:
-            logger.warning(
-                f"M13: {len(all_nan_tickers)} tickers returned entirely NaN data "
-                f"(likely failed silently): {all_nan_tickers[:20]}..."
-                if len(all_nan_tickers) > 20
-                else f"M13: {len(all_nan_tickers)} tickers returned entirely NaN data: "
-                f"{all_nan_tickers}"
-            )
+            # R3-P-12 fix: parenthesize conditional to prevent string concat bug
+            if len(all_nan_tickers) > 20:
+                msg = (
+                    f"M13: {len(all_nan_tickers)} tickers returned entirely NaN data "
+                    f"(likely failed silently): {all_nan_tickers[:20]}..."
+                )
+            else:
+                msg = (
+                    f"M13: {len(all_nan_tickers)} tickers returned entirely NaN data: "
+                    f"{all_nan_tickers}"
+                )
+            logger.warning(msg)
             # Drop entirely-NaN tickers to prevent corrupted downstream features
             df = df.drop(columns=all_nan_tickers, level=0)
 

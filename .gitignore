@@ -29,3 +29,12 @@ skills-lock.json
 
 # Documentation plans (keep local)
 docs/plans/
+
+# SSH keys (never commit private keys)
+deploy/signum_ed25519
+deploy/signum_ed25519.pub
+
+# Session artifacts
+session-*.md
+signum
+signum.pub

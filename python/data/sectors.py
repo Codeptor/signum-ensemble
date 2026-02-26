@@ -1,14 +1,17 @@
 """Sector classification for S&P 500 stocks.
 
 Provides GICS sector mapping for portfolio constraints. Uses a built-in
-mapping for the major S&P 500 constituents, with optional dynamic lookup
-via yfinance for unknown tickers.
+mapping for the major S&P 500 constituents, with dynamic yfinance lookup
+for tickers not in the static map (results are cached for the session).
 """
 
 import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Cache for dynamic yfinance lookups (persists for the process lifetime)
+_dynamic_sector_cache: dict[str, str] = {}
 
 # GICS Sector mapping for major S&P 500 constituents.
 # This covers ~200 of the most liquid names. Unknown tickers
@@ -31,7 +34,7 @@ SECTOR_MAP: dict[str, str] = {
     "AMD": "Technology",
     "AMAT": "Technology",
     "NOW": "Technology",
-    "ISRG": "Technology",
+    "ISRG": "Health Care",
     "ADI": "Technology",
     "LRCX": "Technology",
     "KLAC": "Technology",
@@ -87,7 +90,7 @@ SECTOR_MAP: dict[str, str] = {
     "DHI": "Consumer Discretionary",
     "LEN": "Consumer Discretionary",
     "YUM": "Consumer Discretionary",
-    "DARDEN": "Consumer Discretionary",
+    "DRI": "Consumer Discretionary",
     "POOL": "Consumer Discretionary",
     "APTV": "Consumer Discretionary",
     "BBY": "Consumer Discretionary",
@@ -310,16 +313,76 @@ SECTOR_MAP: dict[str, str] = {
 DEFAULT_MAX_SECTOR_WEIGHT = 0.25
 
 
+def _yf_lookup_sector(ticker: str) -> str:
+    """Look up GICS sector from yfinance for a single ticker.
+
+    Returns the sector string or 'Unknown' on failure.
+    Result is cached in _dynamic_sector_cache for the session.
+    """
+    if ticker in _dynamic_sector_cache:
+        return _dynamic_sector_cache[ticker]
+
+    try:
+        import yfinance as yf
+
+        info = yf.Ticker(ticker).info
+        sector = info.get("sector", "Unknown") if info else "Unknown"
+        # Normalize to our GICS names (yfinance uses slightly different labels)
+        sector_normalization = {
+            "Information Technology": "Technology",
+            "Communication Services": "Communication Services",
+            "Consumer Cyclical": "Consumer Discretionary",
+            "Consumer Defensive": "Consumer Staples",
+            "Healthcare": "Health Care",
+            "Financial Services": "Financials",
+            "Basic Materials": "Materials",
+        }
+        sector = sector_normalization.get(sector, sector)
+        _dynamic_sector_cache[ticker] = sector
+        return sector
+    except Exception as e:
+        logger.debug(f"yfinance sector lookup failed for {ticker}: {e}")
+        _dynamic_sector_cache[ticker] = "Unknown"
+        return "Unknown"
+
+
+def _batch_yf_lookup(tickers: list[str]) -> dict[str, str]:
+    """Look up sectors for multiple tickers via yfinance (batched).
+
+    Only looks up tickers not already in SECTOR_MAP or _dynamic_sector_cache.
+    """
+    unknown = [t for t in tickers if t not in SECTOR_MAP and t not in _dynamic_sector_cache]
+    if not unknown:
+        return {}
+
+    logger.info(f"Looking up sectors for {len(unknown)} unmapped tickers via yfinance...")
+    results: dict[str, str] = {}
+    for ticker in unknown:
+        results[ticker] = _yf_lookup_sector(ticker)
+
+    found = sum(1 for v in results.values() if v != "Unknown")
+    logger.info(f"Sector lookup complete: {found}/{len(unknown)} resolved")
+    return results
+
+
 def get_sector(ticker: str) -> str:
     """Get GICS sector for a ticker.
 
-    Returns 'Unknown' if the ticker is not in the built-in mapping.
+    Checks built-in SECTOR_MAP first, then dynamic cache, then
+    falls back to yfinance lookup. Returns 'Unknown' only if all fail.
     """
-    return SECTOR_MAP.get(ticker, "Unknown")
+    if ticker in SECTOR_MAP:
+        return SECTOR_MAP[ticker]
+    if ticker in _dynamic_sector_cache:
+        return _dynamic_sector_cache[ticker]
+    # Dynamic lookup — result is cached for future calls
+    return _yf_lookup_sector(ticker)
 
 
 def get_sector_map(tickers: list[str]) -> dict[str, str]:
     """Get sector mapping for a list of tickers.
+
+    Performs batch yfinance lookup for any tickers not in the static map.
 
     Args:
         tickers: List of ticker symbols.
@@ -327,6 +390,8 @@ def get_sector_map(tickers: list[str]) -> dict[str, str]:
     Returns:
         Dict mapping ticker -> sector.
     """
+    # Batch lookup all unknown tickers at once
+    _batch_yf_lookup(tickers)
     return {t: get_sector(t) for t in tickers}
 
 
@@ -379,7 +444,11 @@ def enforce_sector_constraints(
     if total > 0:
         w = w / total
 
-    for _ in range(20):  # Iterate until convergence
+    # R3-S-1 fix: capped redistribution — only redistribute to sectors
+    # that can absorb excess without exceeding the cap themselves.
+    capped_sectors: set[str] = set()
+
+    for iteration in range(50):  # generous limit for convergence
         # Calculate current sector weights
         sw: dict[str, float] = {}
         for ticker, weight in w.items():
@@ -394,11 +463,7 @@ def enforce_sector_constraints(
         if not violations:
             break
 
-        # Identify capped (overweight) and free (underweight) tickers
-        capped_sectors = set(violations.keys())
-        free_tickers = [t for t in w.index if smap.get(t, "Unknown") not in capped_sectors]
-
-        # Scale down all overweight sectors to the cap
+        # Scale down ALL overweight sectors to the cap
         excess = 0.0
         for sector, sector_wt in violations.items():
             scale = max_sector_weight / sector_wt
@@ -407,15 +472,48 @@ def enforce_sector_constraints(
                 old = w[t]
                 w[t] *= scale
                 excess += old - w[t]
-            logger.info(
-                f"Sector '{sector}' overweight ({sector_wt:.1%} > {max_sector_weight:.1%}). "
-                f"Scaled down {len(sector_tickers)} positions by {scale:.2f}x"
-            )
+            capped_sectors.add(sector)
+            if iteration == 0:
+                logger.info(
+                    f"Sector '{sector}' overweight ({sector_wt:.1%} > {max_sector_weight:.1%}). "
+                    f"Scaled down {len(sector_tickers)} positions by {scale:.2f}x"
+                )
 
-        # Redistribute excess to non-capped tickers proportionally
+        # Redistribute excess ONLY to sectors that still have room
+        free_tickers = [
+            t
+            for t in w.index
+            if smap.get(t, "Unknown") not in capped_sectors and smap.get(t, "Unknown") != "Unknown"
+        ]
+        # Also include Unknown tickers as absorption targets
+        free_tickers += [t for t in w.index if smap.get(t, "Unknown") == "Unknown"]
+
+        if not free_tickers or excess <= 0:
+            break
+
+        # Compute how much each free sector can still absorb
+        free_sector_room: dict[str, float] = {}
+        free_sector_current: dict[str, float] = {}
+        for t in free_tickers:
+            s = smap.get(t, "Unknown")
+            free_sector_current[s] = free_sector_current.get(s, 0.0) + w[t]
+        for s, cur in free_sector_current.items():
+            if s == "Unknown":
+                free_sector_room[s] = float("inf")
+            else:
+                free_sector_room[s] = max(0.0, max_sector_weight - cur)
+
+        total_room = sum(r for r in free_sector_room.values() if r != float("inf"))
+        # If infinite room (only unknown tickers), distribute proportionally
+        has_inf = any(r == float("inf") for r in free_sector_room.values())
+        if total_room <= 0 and not has_inf:
+            break  # No room anywhere — stop
+
+        # Distribute proportionally to free tickers, capped by sector room
         free_total = sum(w[t] for t in free_tickers)
-        if free_total > 0 and excess > 0:
-            scale_up = (free_total + excess) / free_total
+        if free_total > 0:
+            distributable = min(excess, total_room) if not has_inf else excess
+            scale_up = (free_total + distributable) / free_total
             for t in free_tickers:
                 w[t] *= scale_up
 
@@ -424,4 +522,10 @@ def enforce_sector_constraints(
     if total > 0:
         w = w / total
 
-    return {t: float(v) for t, v in w.items() if v > 0.001}
+    # R3-S-2 fix: filter small weights THEN renormalize to maintain sum-to-1
+    w = w[w > 0.001]
+    total = w.sum()
+    if total > 0:
+        w = w / total
+
+    return {t: float(v) for t, v in w.items()}

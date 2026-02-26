@@ -105,7 +105,9 @@ class MockBroker(BaseBroker):
         avg_price = self._prices.get(stored.symbol) if status == "filled" else None
         return replace(stored, status=status, filled_avg_price=avg_price)
 
-    def list_orders(self, status: str = "open") -> List[BrokerOrder]:
+    def list_orders(
+        self, status: str = "open", limit: int = 500, after: str | None = None
+    ) -> List[BrokerOrder]:
         return list(self._open_orders)
 
     def get_position(self, symbol: str) -> Optional[BrokerPosition]:
@@ -225,15 +227,16 @@ class TestRunTradingCycleIntegration:
 
         # C1 fix: SL+TP are now submitted as OCO pairs (1 order per buy, not 2)
         oco_orders = [
-            o
-            for o in broker.submitted_orders
-            if o.order_class == "oco" and o.side == "sell"
+            o for o in broker.submitted_orders if o.order_class == "oco" and o.side == "sell"
         ]
         # 3 buys = 3 OCO orders (each contains SL + TP)
         assert len(oco_orders) == 3
-        # Each OCO should have both a limit price (TP) and stop_loss_stop_price (SL)
+        # R3-E-8 fix: OCO no longer sets redundant limit_price on parent.
+        # TP is conveyed via take_profit_limit_price, SL via stop_loss_stop_price.
         for oco in oco_orders:
-            assert oco.limit_price is not None, f"OCO for {oco.symbol} missing TP limit_price"
+            assert oco.take_profit_limit_price is not None, (
+                f"OCO for {oco.symbol} missing take_profit_limit_price"
+            )
             assert oco.stop_loss_stop_price is not None, (
                 f"OCO for {oco.symbol} missing SL stop_price"
             )
@@ -367,8 +370,10 @@ class TestRunTradingCycleIntegration:
         ]
         oco_orders = [o for o in msft_sell_orders if o.order_class == "oco"]
         assert len(oco_orders) >= 1, "Expected new OCO SL/TP order for MSFT after buy fill"
-        # The OCO order contains both TP (limit_price) and SL (stop_loss_stop_price)
-        assert oco_orders[0].limit_price is not None, "OCO missing TP limit_price"
+        # The OCO order contains both TP (take_profit_limit_price) and SL (stop_loss_stop_price)
+        assert oco_orders[0].take_profit_limit_price is not None, (
+            "OCO missing TP take_profit_limit_price"
+        )
         assert oco_orders[0].stop_loss_stop_price is not None, "OCO missing SL stop_price"
 
     @patch("examples.live_bot.get_ml_weights")
@@ -491,17 +496,16 @@ class TestSLTPAttachment:
 
         # C1 fix: SL+TP are now submitted as OCO pair (single order)
         oco_orders = [
-            o for o in broker.submitted_orders
-            if o.order_class == "oco" and o.side == "sell"
+            o for o in broker.submitted_orders if o.order_class == "oco" and o.side == "sell"
         ]
         assert len(oco_orders) == 1
 
         expected_sl = round(fill_price - (ATR_SL_MULTIPLIER * atr_value), 2)
         expected_tp = round(fill_price + (ATR_TP_MULTIPLIER * atr_value), 2)
 
-        # OCO order has TP as limit_price and SL as stop_loss_stop_price
+        # OCO order has TP as take_profit_limit_price and SL as stop_loss_stop_price
         assert oco_orders[0].stop_loss_stop_price == expected_sl
-        assert oco_orders[0].limit_price == expected_tp
+        assert oco_orders[0].take_profit_limit_price == expected_tp
 
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)
@@ -657,17 +661,15 @@ class TestOCOTopUpQty:
 
         # The OCO order should protect the FULL position (old 100 + new 150 = 250)
         oco_orders = [
-            o for o in broker.submitted_orders
+            o
+            for o in broker.submitted_orders
             if o.order_class == "oco" and o.side == "sell" and o.symbol == "AAPL"
         ]
         assert len(oco_orders) >= 1
 
         # OCO qty should equal total position after top-up
         # The buy qty is ~150 shares (250 target - 100 existing)
-        buy_orders = [
-            o for o in broker.submitted_orders
-            if o.side == "buy" and o.symbol == "AAPL"
-        ]
+        buy_orders = [o for o in broker.submitted_orders if o.side == "buy" and o.symbol == "AAPL"]
         assert len(buy_orders) >= 1
 
         # The OCO should protect the full post-top-up position

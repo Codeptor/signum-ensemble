@@ -10,8 +10,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Default directory for persisted winsorization bounds
-_BOUNDS_DIR = Path("data/models")
+# R3-P-4 fix: resolve paths relative to project root, not CWD
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_BOUNDS_DIR = _PROJECT_ROOT / "data" / "models"
 
 # Columns that should be winsorized to limit outlier impact (Fix #20)
 _WINSORIZE_COLS = [
@@ -234,15 +235,14 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     lo = df["low"]
     v = df["volume"]
 
-    # Returns
-    for d in [1, 5, 10, 20]:
+    # Returns (R3-P-17 fix: skip ret_1d — computed but never used by model)
+    for d in [5, 10, 20]:
         df[f"ret_{d}d"] = c.pct_change(d)
 
-    # Moving averages
+    # Moving averages (R3-P-13 fix: compute rolling mean once and reuse)
     for w in [5, 10, 20, 60]:
-        df[f"ma_{w}"] = c.rolling(w).mean()
-        # Guard against division by zero in rolling mean
         rolling_mean = c.rolling(w).mean()
+        df[f"ma_{w}"] = rolling_mean
         df[f"ma_ratio_{w}"] = np.where(rolling_mean != 0, c / rolling_mean, np.nan)
 
     # Volatility (using log returns for time-additivity — Fix #21)
@@ -275,9 +275,9 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     bb_range = df["bb_upper"] - df["bb_lower"]
     df["bb_position"] = np.where(bb_range != 0, (c - df["bb_lower"]) / bb_range, 0.5)
 
-    # Volume features
-    df["volume_ma_10"] = v.rolling(10).mean()
+    # Volume features (R3-P-18 fix: compute rolling mean once and reuse)
     vol_ma = v.rolling(10).mean()
+    df["volume_ma_10"] = vol_ma
     df["volume_ratio"] = np.where(vol_ma != 0, v / vol_ma, 1.0)
 
     # Liquidity features
@@ -387,7 +387,11 @@ def merge_macro_features(
         return df
 
     # Derived macro features
-    macro["vix_ma_ratio"] = macro["vix"] / macro["vix"].rolling(20).mean()
+    # R3-P-6 fix: guard against division by zero when rolling mean is 0 or all-NaN
+    vix_ma = macro["vix"].rolling(20).mean()
+    macro["vix_ma_ratio"] = np.where(
+        (vix_ma != 0) & (~np.isnan(vix_ma)), macro["vix"] / vix_ma, 1.0
+    )
     macro["term_spread"] = macro["us10y"] - macro["us3m"]
     macro["term_spread_change_20d"] = macro["term_spread"].diff(20)
 

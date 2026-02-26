@@ -47,7 +47,7 @@ class TestEnsembleInit:
         assert ens.weights == DEFAULT_WEIGHTS
 
     def test_custom_weights(self):
-        custom = {"lightgbm": 0.7, "random_forest": 0.2, "elastic_net": 0.1}
+        custom = {"lightgbm": 0.7, "random_forest": 0.3}
         ens = ModelEnsemble(feature_cols=["a"], weights=custom)
         assert ens.weights == custom
 
@@ -63,7 +63,7 @@ class TestEnsembleInit:
     def test_models_property(self):
         ens = ModelEnsemble(feature_cols=["a"])
         models = ens.models
-        assert set(models.keys()) == {"lightgbm", "random_forest", "elastic_net"}
+        assert set(models.keys()) == {"lightgbm", "random_forest"}
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +87,6 @@ class TestEnsembleFit:
         assert ens.lgbm.model is not None
         # RF should be fitted (has feature_importances_)
         assert hasattr(ens.rf, "feature_importances_")
-        # ElasticNet should be fitted (has coef_)
-        assert hasattr(ens.enet, "coef_")
 
     def test_fit_with_validation_calibrates(self, training_data, validation_data):
         df, cols = training_data
@@ -134,14 +132,14 @@ class TestEnsemblePredict:
         ens.fit(df)
 
         individual = ens.predict_individual(df)
-        assert set(individual.keys()) == {"lightgbm", "random_forest", "elastic_net"}
+        assert set(individual.keys()) == {"lightgbm", "random_forest"}
         for name, preds in individual.items():
             assert len(preds) == len(df), f"{name} prediction length mismatch"
 
     def test_ensemble_is_weighted_average(self, training_data):
         """Ensemble prediction should equal the weighted sum of sub-models."""
         df, cols = training_data
-        weights = {"lightgbm": 0.5, "random_forest": 0.3, "elastic_net": 0.2}
+        weights = {"lightgbm": 0.6, "random_forest": 0.4}
         ens = ModelEnsemble(feature_cols=cols, weights=weights)
         ens.fit(df)
 
@@ -184,7 +182,7 @@ class TestCalibration:
         ens.fit(df)
 
         new_weights = ens.calibrate_weights(val_df)
-        assert set(new_weights.keys()) == {"lightgbm", "random_forest", "elastic_net"}
+        assert set(new_weights.keys()) == {"lightgbm", "random_forest"}
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +207,7 @@ class TestFeatureImportance:
         ens.fit(df)
 
         importance = ens.feature_importance()
-        for model_name in ["lightgbm", "random_forest", "elastic_net", "ensemble"]:
+        for model_name in ["lightgbm", "random_forest", "ensemble"]:
             assert model_name in importance.columns
 
     def test_importance_correct_number_of_features(self, training_data):

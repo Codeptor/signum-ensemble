@@ -126,8 +126,16 @@ class BaseBroker(ABC):
         pass
 
     @abstractmethod
-    def list_orders(self, status: str = "open") -> List[BrokerOrder]:
-        """List orders with given status."""
+    def list_orders(
+        self, status: str = "open", limit: int = 500, after: str | None = None
+    ) -> List[BrokerOrder]:
+        """List orders with given status.
+
+        Args:
+            status: Order status filter ('open', 'closed', 'all').
+            limit: Maximum number of orders to return (R3-E-13).
+            after: Only return orders created after this ISO timestamp.
+        """
         pass
 
     @abstractmethod

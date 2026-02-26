@@ -286,13 +286,22 @@ class AlpacaBroker(BaseBroker):
             return None
 
     @_retry_read
-    def list_orders(self, status: str = "open") -> List[BrokerOrder]:
-        """List orders with given status."""
+    def list_orders(
+        self, status: str = "open", limit: int = 500, after: str | None = None
+    ) -> List[BrokerOrder]:
+        """List orders with given status.
+
+        R3-E-13 fix: accept ``limit`` and ``after`` params to prevent
+        silently missing orders when the account has >500 historical orders.
+        """
         if not self._connected:
             raise ConnectionError("Not connected to Alpaca. Call connect() first.")
 
         try:
-            orders = self.api.list_orders(status=status)
+            kwargs: dict = {"status": status, "limit": limit}
+            if after is not None:
+                kwargs["after"] = after
+            orders = self.api.list_orders(**kwargs)
             return [
                 BrokerOrder(
                     symbol=o.symbol,

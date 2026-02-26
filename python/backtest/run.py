@@ -120,14 +120,31 @@ def _allocate(
 
 
 def _apply_max_weight(weights: pd.Series, max_weight: float) -> pd.Series:
-    """Clip weights to max and renormalize."""
+    """Clip weights to max and iteratively renormalize (R3-B-5 fix).
+
+    A single clip-then-renorm can push previously-uncapped weights above
+    max_weight. This uses the same iterative approach as ``_cap_weights``
+    in optimizer.py: clip, redistribute surplus to uncapped, repeat.
+    """
     if max_weight >= 1.0:
         return weights
-    weights = weights.clip(upper=max_weight)
-    total = weights.sum()
+    w = weights.copy()
+    for _ in range(20):
+        excess_mask = w > max_weight
+        if not excess_mask.any():
+            break
+        surplus = (w[excess_mask] - max_weight).sum()
+        w[excess_mask] = max_weight
+        uncapped = ~excess_mask
+        unc_total = w[uncapped].sum()
+        if unc_total > 0:
+            w[uncapped] += surplus * (w[uncapped] / unc_total)
+        else:
+            break
+    total = w.sum()
     if total > 0:
-        weights /= total
-    return weights
+        w /= total
+    return w
 
 
 def run_backtest(
@@ -350,15 +367,29 @@ def run_backtest(
             cost_pct = total_cost_usd / current_capital
 
             # Weighted return net of costs (use raw returns, not residual)
+            # R3-B-4 fix: get returns for ALL held tickers (including blended
+            # carryovers from prev_weights), not just this period's top-N.
             raw_col = f"raw_target_{rebalance_days}d"
             pnl_col = raw_col if raw_col in top.columns else f"target_{rebalance_days}d"
+            # Start with top tickers' returns
             ticker_returns = top.set_index("ticker")[pnl_col]
+            # Add any carryover tickers from blending that aren't in this period's top
+            missing_tickers = [t for t in weights.index if t not in ticker_returns.index]
+            if missing_tickers and "ticker" in group.columns:
+                carryover = group[group["ticker"].isin(missing_tickers)].set_index("ticker")
+                if pnl_col in carryover.columns:
+                    ticker_returns = pd.concat([ticker_returns, carryover[pnl_col]])
             aligned_w = weights.reindex(ticker_returns.index, fill_value=0.0)
+            # Renormalize aligned weights to account for any still-missing tickers
+            aw_sum = aligned_w.sum()
+            if aw_sum > 0 and abs(aw_sum - 1.0) > 0.01:
+                aligned_w = aligned_w / aw_sum
             ret_gross = (ticker_returns * aligned_w).sum()
             ret_net = ret_gross - cost_pct
 
-            # Update Capital
-            current_capital *= 1 + ret_net
+            # Update Capital (R3-B-8 fix: clamp to prevent negative capital)
+            current_capital *= 1 + max(ret_net, -1.0)
+            current_capital = max(current_capital, 0.0)
 
             all_returns.append(
                 {
@@ -387,7 +418,9 @@ def run_backtest(
     sharpe = (ann_return - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else 0
 
     ann_return_gross = (1 + gross_returns.mean()) ** periods_per_year - 1
-    sharpe_gross = (ann_return_gross - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else 0
+    # R3-B-1 fix: gross Sharpe uses gross-return vol, not net-return vol
+    ann_vol_gross = gross_returns.std() * np.sqrt(periods_per_year)
+    sharpe_gross = (ann_return_gross - RISK_FREE_RATE) / ann_vol_gross if ann_vol_gross > 0 else 0
 
     avg_turnover = total_turnover / max(n_rebalances, 1)
     cumulative = (1 + portfolio_returns).cumprod()

@@ -53,23 +53,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger("LiveBot")
 
-# --- Configuration ---
-TOP_N_STOCKS = 10
-OPTIMIZER_METHOD = "hrp"
-MAX_POSITION_WEIGHT = 0.30
-MAX_PORTFOLIO_VAR_95 = 0.06
-MAX_DRAWDOWN_LIMIT = 0.15
-STOP_LOSS_PCT = 0.05  # 5% trailing stop-loss from entry price (fallback if ATR unavailable)
-TAKE_PROFIT_PCT = 0.15  # 15% take-profit from entry price (fallback if ATR unavailable)
-ATR_SL_MULTIPLIER = 2.0  # Stop-loss at 2x ATR below fill price
-ATR_TP_MULTIPLIER = 3.0  # Take-profit at 3x ATR above fill price (1.5:1 R:R ratio)
-SLEEP_AFTER_TRADE_HOURS = 12
-SLEEP_MARKET_CLOSED_HOURS = 1
-ORDER_POLL_INTERVAL_SECS = 2  # How often to poll for fill status
-ORDER_POLL_TIMEOUT_SECS = 60  # Max time to wait for a fill
+# --- Configuration (all overridable via environment variables) ---
+
+
+def _env_float(key: str, default: float) -> float:
+    """Read a float from env, falling back to default."""
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        logger.warning(f"Invalid float for {key}={val!r}, using default {default}")
+        return default
+
+
+def _env_int(key: str, default: int) -> int:
+    """Read an int from env, falling back to default."""
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        logger.warning(f"Invalid int for {key}={val!r}, using default {default}")
+        return default
+
+
+TOP_N_STOCKS = _env_int("TOP_N_STOCKS", 10)
+OPTIMIZER_METHOD = os.getenv("OPTIMIZER_METHOD", "hrp")
+MAX_POSITION_WEIGHT = _env_float("MAX_POSITION_WEIGHT", 0.30)
+MAX_PORTFOLIO_VAR_95 = _env_float("MAX_PORTFOLIO_VAR_95", 0.06)
+MAX_DRAWDOWN_LIMIT = _env_float("MAX_DRAWDOWN_LIMIT", 0.15)
+STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.05)
+TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.15)
+ATR_SL_MULTIPLIER = _env_float("ATR_SL_MULTIPLIER", 2.0)
+ATR_TP_MULTIPLIER = _env_float("ATR_TP_MULTIPLIER", 3.0)
+SLEEP_AFTER_TRADE_HOURS = _env_int("SLEEP_AFTER_TRADE_HOURS", 12)
+SLEEP_MARKET_CLOSED_HOURS = _env_int("SLEEP_MARKET_CLOSED_HOURS", 1)
+ORDER_POLL_INTERVAL_SECS = _env_int("ORDER_POLL_INTERVAL_SECS", 2)
+ORDER_POLL_TIMEOUT_SECS = _env_int("ORDER_POLL_TIMEOUT_SECS", 60)
 TERMINAL_ORDER_STATES = {
     "filled",
-    "partially_filled",
     "canceled",
     "cancelled",
     "expired",
@@ -79,8 +104,8 @@ TERMINAL_ORDER_STATES = {
 # --- Rebalancing schedule (Phase 1: Cost Reduction) ---
 # Weekly rebalancing reduces transaction costs by ~74% vs daily.
 # Wednesday chosen: avoids Monday/Friday effects, mid-week liquidity is higher.
-REBALANCE_DAY = 2  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
-REBALANCE_FREQUENCY = "weekly"  # "daily" or "weekly"
+REBALANCE_DAY = _env_int("REBALANCE_DAY", 2)  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+REBALANCE_FREQUENCY = os.getenv("REBALANCE_FREQUENCY", "weekly")  # "daily" or "weekly"
 
 # --- Alerting (Fix #37) ---
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord/generic webhook
@@ -398,6 +423,37 @@ def _save_bot_state(state: dict) -> None:
         logger.warning(f"Could not save bot state: {e}")
 
 
+EQUITY_HISTORY_FILE = Path("data/equity_history.json")
+
+
+def _append_equity_history(equity: float) -> None:
+    """Append an equity snapshot to the equity history file (R3-E-12 fix).
+
+    The dashboard reads this file to display the equity curve.
+    Each entry is {date, equity}.
+    """
+    try:
+        EQUITY_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        records = []
+        if EQUITY_HISTORY_FILE.exists():
+            with open(EQUITY_HISTORY_FILE, "r") as f:
+                records = json.load(f)
+        records.append(
+            {
+                "date": datetime.now(tz=ZoneInfo("America/New_York")).isoformat(),
+                "equity": round(equity, 2),
+            }
+        )
+        # Keep last 2000 entries to avoid unbounded growth
+        records = records[-2000:]
+        tmp = EQUITY_HISTORY_FILE.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(records, f)
+        tmp.replace(EQUITY_HISTORY_FILE)
+    except Exception as e:
+        logger.warning(f"Could not append equity history: {e}")
+
+
 def _has_traded_today(broker: AlpacaBroker) -> bool:
     """Check if the bot has already submitted orders today.
 
@@ -406,23 +462,19 @@ def _has_traded_today(broker: AlpacaBroker) -> bool:
 
     C2 fix: created_at may be a datetime or string — normalize to string.
     M1 fix: use UTC date to match Alpaca's UTC timestamps.
+    R3-E-13 fix: use ``after`` param to scope query to today's orders only,
+    avoiding the 500-order pagination limit.
     """
     try:
         from datetime import timezone
 
-        # Get all orders (including closed)
-        orders = broker.list_orders(status="all")
-
-        # M1 fix: use UTC date to match Alpaca order timestamps
+        # R3-E-13 fix: scope query to today's orders using ``after`` parameter
         today_utc = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        after_ts = f"{today_utc}T00:00:00Z"
+        orders = broker.list_orders(status="all", after=after_ts)
+
         executed_today = [
-            o
-            for o in orders
-            if o.status not in ("canceled", "cancelled", "expired")
-            and o.order_id
-            and hasattr(o, "created_at")
-            and o.created_at
-            and str(o.created_at).startswith(today_utc)  # C2 fix: str() handles datetime
+            o for o in orders if o.status not in ("canceled", "cancelled", "expired") and o.order_id
         ]
 
         if executed_today:
@@ -460,7 +512,7 @@ def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> 
     try:
         import yfinance as yf
 
-        data = yf.download(symbols, period="1y", interval="1d", progress=False)
+        data = yf.download(symbols, period="1y", interval="1d", progress=False, auto_adjust=True)
         if data is not None and len(data) > 0:
             close_raw = data["Close"]
             close: pd.DataFrame = (
@@ -573,6 +625,32 @@ def run_trading_cycle(
     for ticker, w in sorted(target_weights.items(), key=lambda x: -x[1]):
         logger.info(f"  {ticker}: {w:.2%}")
 
+    # Feature drift detection — compare inference features to training reference.
+    # Informational only during paper trading: log and alert but don't block.
+    import python.alpha.predict as _predict_mod
+
+    drift_report = _predict_mod._last_drift_report
+    if drift_report is not None:
+        drifted_features = [k for k, v in drift_report.items() if v["drifted"]]
+        total_features = len(drift_report)
+        if drifted_features:
+            drift_pct = len(drifted_features) / total_features * 100
+            logger.warning(
+                f"DRIFT ALERT: {len(drifted_features)}/{total_features} features "
+                f"({drift_pct:.0f}%) show distribution drift: {drifted_features}"
+            )
+            # High-severity PSI (>0.2 indicates major shift)
+            severe = [f for f in drifted_features if drift_report[f].get("psi", 0) > 0.2]
+            if severe:
+                logger.warning(f"  High PSI (>0.2) features: {severe}")
+            _send_alert(
+                f"[LiveBot] Feature drift detected: {len(drifted_features)}/{total_features} "
+                f"features drifted. High-PSI: {severe or 'none'}. "
+                f"Model predictions may be degraded."
+            )
+        else:
+            logger.info(f"Drift check passed: 0/{total_features} features drifted")
+
     # Apply regime-based exposure adjustment (Phase 2: Risk Management)
     # H-CAUTION fix: track whether caution mode is active to prevent renorm undoing it
     in_caution_mode = False
@@ -634,6 +712,13 @@ def run_trading_cycle(
     # silently rejected after the first cycle (cash ≈ 0 from simulated fills).
     bridge.equity = account.equity
     bridge.cash = account.cash
+
+    # R3-E-1 fix: reset ALL bridge positions before syncing from broker.
+    # Without this, positions closed via SL/TP between cycles remain as
+    # ghost entries in the bridge, causing spurious sell orders.
+    for ticker in list(bridge.positions.keys()):
+        bridge.positions[ticker].quantity = 0.0
+        bridge.positions[ticker].avg_cost = 0.0
 
     # Sync current positions from broker into the bridge
     current_positions = broker.list_positions()
@@ -791,12 +876,13 @@ def run_trading_cycle(
                     # C1/C-OCO-1 fix: submit SL+TP as OCO pair (one-cancels-other).
                     # When SL fills, TP is automatically cancelled (and vice versa),
                     # preventing orphaned orders from creating naked short positions.
+                    # R3-E-8 fix: remove redundant limit_price on parent —
+                    # OCO legs define their own prices via take_profit/stop_loss.
                     oco_order = BrokerOrder(
                         symbol=entry["symbol"],
                         side="sell",
                         qty=sl_tp_qty,
                         order_type="limit",
-                        limit_price=tp_price,
                         time_in_force="gtc",
                         order_class="oco",
                         take_profit_limit_price=tp_price,
@@ -992,7 +1078,9 @@ def main():
     # Create execution bridge once — persists equity curve, P&L, and weight
     # history across cycles. Each cycle syncs positions/equity from broker.
     account = broker.get_account()
-    bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=account.equity)
+    bridge = ExecutionBridge(
+        risk_manager=risk_manager, initial_capital=account.equity, commission_rate=0.0
+    )
     _bridge_ref[0] = bridge  # C3 fix: make bridge accessible to SIGTERM handler
 
     try:
@@ -1026,10 +1114,17 @@ def main():
                 # Re-initialize risk engine each cycle to capture new positions
                 _initialize_risk_engine(broker, risk_manager)
 
-                # Check portfolio-level risk before trading
-                # Get current position weights from broker
+                # R3-E-3 fix: sync risk_manager.current_weights from broker
+                # so trade-size, leverage, and sector checks use actual positions
                 positions = broker.list_positions()
                 account = broker.get_account()
+                if positions and account.equity > 0:
+                    risk_manager.current_weights = pd.Series(
+                        {p.symbol: p.market_value / account.equity for p in positions}
+                    )
+
+                # Check portfolio-level risk before trading
+                # Get current position weights from broker
                 if positions and account.equity > 0:
                     weights = pd.Series(
                         {p.symbol: p.market_value / account.equity for p in positions}
@@ -1105,21 +1200,31 @@ def main():
                 )
 
                 # Persist state after trading cycle (P1-6)
+                # R3-E-7 fix: persist equity_peak for drawdown tracking across restarts
+                current_equity = bridge.equity
+                prev_state = _load_bot_state()
+                equity_peak = max(
+                    current_equity,
+                    prev_state.get("equity_peak", current_equity),
+                )
                 _save_bot_state(
                     {
                         "last_trade_date": datetime.now(
                             tz=ZoneInfo("America/New_York")
                         ).isoformat(),
-                        "last_equity": bridge.equity,
+                        "last_equity": current_equity,
+                        "equity_peak": equity_peak,
                         "positions_count": len(bridge.positions),
                     }
                 )
 
+                # R3-E-12 fix: append to equity_history.json for dashboard visibility
+                _append_equity_history(current_equity)
+
                 if traded:
-                    # Sleep until next market open (dynamic, Fix #34)
-                    next_open = clock.get("next_open")
-                    # After trading, sleep until market re-opens next session
-                    # If next_open is available and in the future, sleep until then
+                    # R3-E-2 fix: re-fetch clock after trading to get fresh next_open
+                    fresh_clock = broker.get_clock()
+                    next_open = fresh_clock.get("next_open")
                     if next_open:
                         sleep_secs = _seconds_until(next_open)
                         logger.info(

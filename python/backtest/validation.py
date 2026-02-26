@@ -26,28 +26,49 @@ def walk_forward_split(
     """Walk-forward cross-validation with embargo period.
 
     Yields (train_indices, test_indices) tuples.
-    Embargo period prevents data leakage from overlapping return windows.
+
+    R3-V-1 fix: embargo is now computed in *date-space* (unique dates)
+    rather than row-space, so it correctly represents trading days even
+    with panel data (multiple rows per date).
     """
-    n = len(df)
-    # Reserve a minimum training window, then divide the rest into test folds
-    min_train = max(1, int(n * train_pct / (n_splits + train_pct * (1 - n_splits))))
-    # Compute test_size so that n_splits folds fit after the first training window
-    total_test = n - min_train - embargo_days
-    test_size = total_test // n_splits
+    # Determine if we have date information in the index
+    if hasattr(df.index, "get_level_values"):
+        try:
+            dates = df.index.get_level_values(0)
+        except Exception:
+            dates = df.index
+    else:
+        dates = df.index
+
+    unique_dates = dates.unique().sort_values()
+    n_dates = len(unique_dates)
+
+    if n_dates < n_splits + embargo_days:
+        return
+
+    min_train_dates = max(1, int(n_dates * train_pct / (n_splits + train_pct * (1 - n_splits))))
+    total_test_dates = n_dates - min_train_dates - embargo_days
+    test_date_size = total_test_dates // n_splits
+
+    if test_date_size <= 0:
+        return
 
     for i in range(n_splits):
-        test_start = min_train + embargo_days + i * test_size
-        test_end = test_start + test_size if i < n_splits - 1 else n
-        train_end = test_start - embargo_days
-        # Expanding window: use all available history (Fix #39)
-        train_start = 0
+        test_date_start = min_train_dates + embargo_days + i * test_date_size
+        test_date_end = test_date_start + test_date_size if i < n_splits - 1 else n_dates
+        train_date_end = test_date_start - embargo_days
 
-        if train_start >= train_end or test_start >= n:
+        if train_date_end <= 0 or test_date_start >= n_dates:
             continue
 
-        train_idx = list(range(train_start, train_end))
-        test_idx = list(range(test_start, min(test_end, n)))
-        yield train_idx, test_idx
+        train_dates = set(unique_dates[:train_date_end])
+        test_dates = set(unique_dates[test_date_start : min(test_date_end, n_dates)])
+
+        train_idx = [j for j, d in enumerate(dates) if d in train_dates]
+        test_idx = [j for j, d in enumerate(dates) if d in test_dates]
+
+        if train_idx and test_idx:
+            yield train_idx, test_idx
 
 
 def deflated_sharpe_ratio(
@@ -64,11 +85,20 @@ def deflated_sharpe_ratio(
     """
     from scipy import stats
 
+    # R3-B-3 fix: guard n_trials <= 1 (no multiple-testing penalty)
+    if n_trials <= 1 or n_observations <= 0:
+        return 1.0
+
     # Expected max Sharpe under null (Euler-Mascheroni approximation)
-    e_max = stats.norm.ppf(1 - 1 / n_trials) * (1 - 0.5772 / np.log(n_trials))
+    log_n = np.log(n_trials)
+    if log_n <= 0:
+        return 1.0
+    e_max = stats.norm.ppf(1 - 1 / n_trials) * (1 - 0.5772 / log_n)
 
     # Standard error of Sharpe
     se = np.sqrt((1 - skewness * sharpe + (kurtosis - 1) / 4 * sharpe**2) / n_observations)
+    if se <= 0:
+        return 1.0
 
     # Probability that the observed Sharpe exceeds the expected max under null
     dsr = stats.norm.cdf((sharpe - e_max) / se)
