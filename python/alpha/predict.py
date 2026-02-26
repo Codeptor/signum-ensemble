@@ -7,6 +7,7 @@ It handles the full pipeline from raw OHLCV data to target portfolio weights.
 import hashlib
 import json
 import logging
+import random
 from datetime import date, datetime
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import joblib
 import pandas as pd
 
 from python.alpha.features import (
+    FEATURE_NEUTRAL_DEFAULTS,
     compute_alpha_features,
     compute_cross_sectional_features,
 )
@@ -244,7 +246,23 @@ def train_model(
         logger.info("No cached data found, fetching S&P 500 history for training...")
         from python.data.ingestion import fetch_sp500_tickers
 
-        tickers = training_tickers or fetch_sp500_tickers()[:100]  # Top 100 for speed
+        # H10 warning: survivorship bias — current S&P 500 list is used to
+        # fetch historical data.  Companies removed from the index (bankruptcy,
+        # delisting, M&A) before today are excluded, which inflates apparent
+        # model performance.  For paper trading this is acceptable; any backtest
+        # should use a point-in-time membership table instead.
+        logger.warning(
+            "SURVIVORSHIP BIAS: training on *current* S&P 500 constituents. "
+            "Delisted/removed companies are excluded from history. "
+            "Use a point-in-time membership table for unbiased backtests."
+        )
+
+        # M12 fix: use a random sample instead of the first 100 alphabetically.
+        # Alphabetical slicing (A-D) introduces systematic sector/name bias.
+        # Seed is fixed for reproducibility across runs on the same day.
+        all_tickers = fetch_sp500_tickers()
+        random.seed(42)
+        tickers = training_tickers or random.sample(all_tickers, min(100, len(all_tickers)))
         raw = fetch_ohlcv(tickers, period=TRAINING_LOOKBACK)
         long = reshape_ohlcv_wide_to_long(raw)
 
@@ -328,12 +346,16 @@ def rank_stocks(
     missing_cols = [c for c in model.feature_cols if c not in latest.columns]
 
     if missing_cols:
+        # M11 fix: use domain-appropriate neutral defaults instead of 0.0.
+        # Filling VIX with 0.0 tricks the model into "extreme calm" predictions;
+        # FEATURE_NEUTRAL_DEFAULTS provides long-run median values per feature.
+        fill_values = {col: FEATURE_NEUTRAL_DEFAULTS.get(col, 0.0) for col in missing_cols}
         logger.warning(
             f"Missing {len(missing_cols)} features at inference time: {missing_cols}. "
-            f"Filling with 0.0 — predictions may be degraded."
+            f"Filling with neutral defaults: {fill_values} — predictions may be degraded."
         )
         for col in missing_cols:
-            latest[col] = 0.0
+            latest[col] = fill_values[col]
 
     latest = latest.dropna(subset=model.feature_cols)
 
@@ -358,6 +380,7 @@ def optimize_weights(
     current_weights: dict[str, float] | None = None,
     turnover_threshold: float = 0.20,
     max_weight: float | None = None,
+    price_data: pd.DataFrame | None = None,
 ) -> dict[str, float]:
     """Run portfolio optimization on selected tickers.
 
@@ -370,10 +393,16 @@ def optimize_weights(
         turnover_threshold: Minimum turnover to justify rebalancing (default 20%).
         max_weight: Optional cap on individual asset weight (e.g. 0.30).
             Passed through to PortfolioOptimizer for post-optimization capping.
+        price_data: H11 fix — pre-fetched raw OHLCV DataFrame from yfinance.
+            If provided, skips the second fetch call and uses this data directly.
+            This prevents data inconsistency from two independent HTTP calls.
 
     Returns a dict of {ticker: weight}.
     """
-    raw = fetch_ohlcv(tickers, period=period)
+    if price_data is not None:
+        raw = price_data
+    else:
+        raw = fetch_ohlcv(tickers, period=period)
     prices = extract_close_prices(raw)
 
     # Drop columns (tickers) with too many NaNs
@@ -463,8 +492,20 @@ def get_ml_weights(
     from python.data.ingestion import fetch_sp500_tickers
 
     universe = fetch_sp500_tickers()
-    # Fetch enough history for feature computation
-    universe_data = fetch_universe(universe, period=MIN_HISTORY_DAYS)
+
+    # H11 fix: fetch raw OHLCV once and reuse for both ranking and optimization.
+    # Previously, fetch_universe fetched data for ranking, then optimize_weights
+    # fetched again independently — the two HTTP calls could return different data.
+    raw_ohlcv = fetch_ohlcv(universe, period=MIN_HISTORY_DAYS)
+    universe_data = reshape_ohlcv_wide_to_long(raw_ohlcv)
+    # Apply minimum-history filter
+    counts = universe_data.groupby("ticker").size()
+    min_rows = 80
+    valid_tickers = counts[counts >= min_rows].index
+    dropped = set(universe_data["ticker"].unique()) - set(valid_tickers)
+    if dropped:
+        logger.warning(f"Dropped {len(dropped)} tickers with insufficient history: {dropped}")
+    universe_data = universe_data[universe_data["ticker"].isin(valid_tickers)]
 
     # Step 3: Compute features and rank
     logger.info("Step 3/4: Computing features and ranking stocks...")
@@ -475,7 +516,7 @@ def get_ml_weights(
         logger.error("ML pipeline produced no stock picks — aborting")
         return {}
 
-    # Step 4: Optimize weights for the selected stocks
+    # Step 4: Optimize weights using the SAME data (H11 fix — no double fetch)
     logger.info(f"Step 4/4: Optimizing weights for {top_tickers}...")
     weights = optimize_weights(
         top_tickers,
@@ -483,6 +524,7 @@ def get_ml_weights(
         current_weights=current_weights,
         turnover_threshold=turnover_threshold,
         max_weight=max_weight,
+        price_data=raw_ohlcv,  # H11: reuse pre-fetched data
     )
 
     logger.info(f"=== ML Pipeline complete: {len(weights)} positions ===")
