@@ -121,13 +121,40 @@ def fetch_ohlcv(
             # Drop entirely-NaN tickers to prevent corrupted downstream features
             df = df.drop(columns=all_nan_tickers, level=0)
 
-    # Forward-fill small gaps (weekends/holidays already absent), then drop
-    # any remaining rows that are entirely NaN for a ticker.
+    # Forward-fill small gaps (weekends/holidays already absent), then
+    # aggressively clean remaining NaNs to prevent corrupted rolling features.
     df = df.ffill(limit=3)
+
+    # C-NAN fix: ``dropna(how="all")`` only dropped rows where EVERY column
+    # was NaN, leaving partial-NaN rows that corrupt rolling features for
+    # the affected tickers.  Instead, drop *ticker columns* that still have
+    # >5% NaN after ffill (these tickers had extended data gaps), then drop
+    # any remaining fully-NaN rows.
+    if isinstance(df.columns, pd.MultiIndex):
+        # Per-ticker NaN check on the MultiIndex structure
+        ticker_level = df.columns.get_level_values(0).unique()
+        high_nan_tickers = []
+        for t in ticker_level:
+            nan_frac_t = df[t].isna().mean().mean()
+            if nan_frac_t > 0.05:
+                high_nan_tickers.append(t)
+        if high_nan_tickers:
+            logger.warning(
+                f"C-NAN: dropping {len(high_nan_tickers)} tickers with >5% NaN "
+                f"after ffill: {high_nan_tickers[:20]}"
+            )
+            df = df.drop(columns=high_nan_tickers, level=0)
+
     remaining_nans = df.isna().sum().sum()
     if remaining_nans > 0:
-        logger.warning(f"Dropping {remaining_nans} residual NaN values after ffill(limit=3)")
+        logger.warning(
+            f"Dropping residual NaN: {remaining_nans} values across "
+            f"{df.isna().any(axis=1).sum()} rows after ffill + ticker pruning"
+        )
+        # Drop rows that are entirely NaN, then forward-fill any scattered
+        # single-cell gaps that survived (limited to 1 for safety).
         df = df.dropna(axis=0, how="all")
+        df = df.ffill(limit=1).bfill(limit=1)
     return df
 
 

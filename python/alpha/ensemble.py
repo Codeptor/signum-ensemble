@@ -21,6 +21,22 @@ from python.alpha.model import DEFAULT_SEED, CrossSectionalModel
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_ic(pred: np.ndarray, actual: np.ndarray) -> float:
+    """Compute Information Coefficient with NaN/zero-variance guard.
+
+    C-CORR fix: ``np.corrcoef`` returns NaN when either array has zero
+    variance, and ``max(0.0, nan)`` propagates nondeterministically in
+    Python.  This helper returns 0.0 in all degenerate cases.
+    """
+    if len(pred) < 2 or len(actual) < 2:
+        return 0.0
+    if np.std(pred) < 1e-10 or np.std(actual) < 1e-10:
+        return 0.0
+    ic = float(np.corrcoef(pred, actual)[0, 1])
+    return 0.0 if (np.isnan(ic) or ic < 0) else ic
+
+
 # Default ensemble weights (prior to IC-based calibration)
 DEFAULT_WEIGHTS = {
     "lightgbm": 0.50,
@@ -198,18 +214,19 @@ class ModelEnsemble:
 
         ics: dict[str, float] = {}
 
-        # LightGBM — uses DataFrame interface
+        # C-CORR fix: use _safe_ic instead of raw np.corrcoef to handle
+        # zero-variance predictions (e.g. Elastic Net returning a constant).
         lgbm_pred = self.lgbm.predict(val_clean)
-        ics["lightgbm"] = float(np.corrcoef(lgbm_pred, y_clean)[0, 1])
+        ics["lightgbm"] = _safe_ic(lgbm_pred, y_clean)
 
-        # RF and ElasticNet — use array interface
         X_clean = X_val[mask]
-        ics["random_forest"] = float(np.corrcoef(self.rf.predict(X_clean), y_clean)[0, 1])
-        ics["elastic_net"] = float(np.corrcoef(self.enet.predict(X_clean), y_clean)[0, 1])
+        ics["random_forest"] = _safe_ic(self.rf.predict(X_clean), y_clean)
+        ics["elastic_net"] = _safe_ic(self.enet.predict(X_clean), y_clean)
 
         logger.info(f"  Individual model ICs: {ics}")
 
-        # Only keep models with positive IC
+        # C-CORR fix: _safe_ic already returns 0.0 for negative/NaN ICs,
+        # so max(0, ic) is redundant but kept for clarity.
         positive_ics = {name: max(0.0, ic) for name, ic in ics.items()}
         total_ic = sum(positive_ics.values())
 

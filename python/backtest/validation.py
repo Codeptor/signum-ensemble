@@ -85,23 +85,37 @@ def purged_kfold_split(
     n_splits: int = 5,
     purge_pct: float = 0.02,
     embargo_pct: float = 0.01,
+    dates: Optional[np.ndarray] = None,
+    horizon: int = 5,
 ) -> Generator[tuple[list[int], list[int]], None, None]:
     """Purged k-fold split with embargo (Lopez de Prado, 2018).
 
     Unlike standard k-fold, this accounts for temporal dependence in
     financial data by:
 
-    1. **Purge**: Removing ``purge_pct`` of the fold size *before* each
-       test fold from the training set to eliminate label overlap.
-    2. **Embargo**: Removing ``embargo_pct`` of the fold size *after*
-       each test fold from the training set to prevent information leakage
-       from auto-correlated features.
+    1. **Purge**: Removing days *before* each test fold from the training
+       set to eliminate label overlap from the forward-return horizon.
+    2. **Embargo**: Removing days *after* each test fold from the training
+       set to prevent information leakage from auto-correlated features.
+
+    C-PURGE fix: the split now operates on **unique dates**, not raw row
+    indices.  With a panel of 500 tickers per date, the old row-based
+    approach created a purge gap of ~0 calendar days (``int(fold_size *
+    0.02)`` ≈ 4 rows ≈ 0 dates), providing zero leakage protection.
+    The new version ensures the purge gap is *at least* ``horizon``
+    trading days in calendar space.
 
     Args:
         n_samples: Total number of observations (assumed time-ordered).
         n_splits: Number of folds (default 5).
-        purge_pct: Fraction of fold size to purge before test set.
-        embargo_pct: Fraction of fold size to embargo after test set.
+        purge_pct: Fraction of date-level fold size to purge before test.
+        embargo_pct: Fraction of date-level fold size to embargo after test.
+        dates: Optional 1-D array of date labels (one per row).  When
+            provided, the split operates in date-space.  When None, falls
+            back to row-level splitting (backward-compatible).
+        horizon: Forward-return horizon in trading days.  Purge gap is
+            ``max(horizon, int(fold_dates * purge_pct))`` so it is never
+            smaller than the label window.
 
     Yields:
         (train_indices, test_indices) tuples for each fold.
@@ -111,6 +125,54 @@ def purged_kfold_split(
     if n_samples < n_splits:
         raise ValueError(f"n_samples ({n_samples}) must be >= n_splits ({n_splits})")
 
+    # ----- Date-aware path (C-PURGE fix) ----- #
+    if dates is not None:
+        unique_dates = np.unique(dates)
+        unique_dates.sort()
+        n_dates = len(unique_dates)
+
+        if n_dates < n_splits:
+            raise ValueError(f"Only {n_dates} unique dates but {n_splits} splits requested")
+
+        fold_dates = n_dates // n_splits
+        purge_days = max(horizon, int(fold_dates * purge_pct))
+        embargo_days = max(1, int(fold_dates * embargo_pct))
+
+        # Build a row-index lookup: date -> list of row positions
+        date_to_rows: dict = {}
+        for idx, d in enumerate(dates):
+            date_to_rows.setdefault(d, []).append(idx)
+
+        for i in range(n_splits):
+            test_date_start = i * fold_dates
+            test_date_end = (i + 1) * fold_dates if i < n_splits - 1 else n_dates
+
+            # Purge and embargo in date-space
+            purge_date_start = max(0, test_date_start - purge_days)
+            embargo_date_end = min(n_dates, test_date_end + embargo_days)
+
+            # Collect row indices for train / test
+            train_dates_before = unique_dates[:purge_date_start]
+            train_dates_after = unique_dates[embargo_date_end:]
+            test_dates = unique_dates[test_date_start:test_date_end]
+
+            train_idx = []
+            for d in train_dates_before:
+                train_idx.extend(date_to_rows[d])
+            for d in train_dates_after:
+                train_idx.extend(date_to_rows[d])
+
+            test_idx = []
+            for d in test_dates:
+                test_idx.extend(date_to_rows[d])
+
+            if len(train_idx) == 0 or len(test_idx) == 0:
+                continue
+
+            yield sorted(train_idx), sorted(test_idx)
+        return
+
+    # ----- Legacy row-level path (backward-compatible) ----- #
     fold_size = n_samples // n_splits
     purge_size = max(1, int(fold_size * purge_pct))
     embargo_size = max(1, int(fold_size * embargo_pct))
@@ -119,7 +181,6 @@ def purged_kfold_split(
         test_start = i * fold_size
         test_end = (i + 1) * fold_size if i < n_splits - 1 else n_samples
 
-        # Training indices: everything except (purge + test + embargo)
         purge_start = max(0, test_start - purge_size)
         embargo_end = min(n_samples, test_end + embargo_size)
 
@@ -142,11 +203,16 @@ def purged_kfold_cv(
     purge_pct: float = 0.02,
     embargo_pct: float = 0.01,
     model_factory: Optional[object] = None,
+    horizon: int = 5,
 ) -> tuple[float, float, list[float]]:
     """Run purged k-fold cross-validation and return IC statistics.
 
     Trains a fresh model per fold and evaluates Information Coefficient
     (Spearman rank correlation between predictions and true targets).
+
+    C-PURGE fix: when ``df`` has a DatetimeIndex (or a MultiIndex whose
+    level-0 is datetime), the split is performed in date-space with a
+    purge gap of at least ``horizon`` trading days.
 
     Args:
         df: DataFrame with feature columns and target, assumed time-ordered.
@@ -158,6 +224,7 @@ def purged_kfold_cv(
         model_factory: Callable that returns a fresh model instance with
             ``.fit(df, target_col)`` and ``.predict(df)`` methods.
             Defaults to ``CrossSectionalModel(feature_cols=feature_cols)``.
+        horizon: Forward-return horizon in trading days (default 5).
 
     Returns:
         (mean_ic, std_ic, fold_ics) — mean IC, standard deviation, and
@@ -166,10 +233,25 @@ def purged_kfold_cv(
     from python.alpha.model import CrossSectionalModel
 
     n_samples = len(df)
+
+    # C-PURGE fix: extract date array for date-aware splitting
+    dates_array: Optional[np.ndarray] = None
+    if isinstance(df.index, pd.MultiIndex):
+        dates_array = df.index.get_level_values(0).values
+    elif isinstance(df.index, pd.DatetimeIndex):
+        dates_array = df.index.values
+
     fold_ics: list[float] = []
 
     for fold_num, (train_idx, test_idx) in enumerate(
-        purged_kfold_split(n_samples, n_splits, purge_pct, embargo_pct)
+        purged_kfold_split(
+            n_samples,
+            n_splits,
+            purge_pct,
+            embargo_pct,
+            dates=dates_array,
+            horizon=horizon,
+        )
     ):
         train_df = df.iloc[train_idx]
         test_df = df.iloc[test_idx]
