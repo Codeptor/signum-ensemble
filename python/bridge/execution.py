@@ -302,6 +302,23 @@ class ExecutionBridge:
         """
         fills = []
 
+        # Close positions not in target weights (stale positions)
+        for ticker in list(self.positions.keys()):
+            pos = self.positions[ticker]
+            if pos.quantity > 1e-6 and ticker not in target_weights:
+                if ticker not in prices:
+                    logger.warning(f"Cannot close stale position {ticker}: no price available")
+                    continue
+                fill = self.submit_order(
+                    ticker=ticker,
+                    side="SELL",
+                    quantity=pos.quantity,
+                    current_price=prices[ticker],
+                    current_date=current_date,
+                )
+                if fill:
+                    fills.append(fill)
+
         for ticker, target_weight in target_weights.items():
             if ticker not in prices:
                 continue
