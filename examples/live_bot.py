@@ -45,6 +45,53 @@ STOP_LOSS_PCT = 0.05  # 5% trailing stop-loss from entry price
 TAKE_PROFIT_PCT = 0.15  # 15% take-profit from entry price
 SLEEP_AFTER_TRADE_HOURS = 12
 SLEEP_MARKET_CLOSED_HOURS = 1
+ORDER_POLL_INTERVAL_SECS = 2  # How often to poll for fill status
+ORDER_POLL_TIMEOUT_SECS = 60  # Max time to wait for a fill
+TERMINAL_ORDER_STATES = {"filled", "canceled", "cancelled", "expired", "rejected"}
+
+
+def _verify_order_fill(
+    broker: AlpacaBroker,
+    order_id: str,
+    symbol: str,
+    expected_qty: float,
+) -> dict:
+    """Poll broker until order reaches a terminal state.
+
+    Returns a dict with keys: status, filled_qty, symbol, order_id.
+    """
+    elapsed = 0.0
+    while elapsed < ORDER_POLL_TIMEOUT_SECS:
+        time.sleep(ORDER_POLL_INTERVAL_SECS)
+        elapsed += ORDER_POLL_INTERVAL_SECS
+
+        order = broker.get_order(order_id)
+        if order is None:
+            logger.warning(f"  Could not fetch order {order_id} for {symbol}")
+            continue
+
+        status = (order.status or "").lower()
+        if status in TERMINAL_ORDER_STATES:
+            return {
+                "status": status,
+                "filled_qty": order.qty,
+                "symbol": symbol,
+                "order_id": order_id,
+            }
+
+        logger.debug(f"  Order {order_id} ({symbol}): status={status}, waiting...")
+
+    # Timeout — order is still open
+    logger.warning(
+        f"  Order {order_id} ({symbol}) did not reach terminal state "
+        f"within {ORDER_POLL_TIMEOUT_SECS}s"
+    )
+    return {
+        "status": "timeout",
+        "filled_qty": 0,
+        "symbol": symbol,
+        "order_id": order_id,
+    }
 
 
 def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> None:
@@ -215,7 +262,7 @@ def run_trading_cycle(
 
     # 6. Submit orders to Alpaca (bracket orders for buys, simple for sells)
     logger.info("Submitting orders to Alpaca...")
-    orders_submitted = 0
+    submitted_orders: list[dict] = []  # Track for fill verification
     for fill in fills:
         try:
             symbol = fill.order.ticker
@@ -256,13 +303,62 @@ def run_trading_cycle(
                 )
 
             order_id = broker.submit_order(broker_order)
-            orders_submitted += 1
+            submitted_orders.append(
+                {
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty,
+                }
+            )
             logger.info(f"  Submitted: {side.upper()} {qty} {symbol} -> Order ID: {order_id}")
         except Exception as e:
             logger.error(f"  Failed to submit order for {fill.order.ticker}: {e}")
 
-    logger.info(f"Trading cycle complete. {orders_submitted} orders submitted.")
-    return orders_submitted > 0
+    if not submitted_orders:
+        logger.info("No orders were submitted.")
+        return False
+
+    # 7. Verify fills — poll each order until terminal state
+    logger.info(f"Verifying {len(submitted_orders)} order fills...")
+    filled_count = 0
+    partial_count = 0
+    failed_count = 0
+
+    for entry in submitted_orders:
+        result = _verify_order_fill(broker, entry["order_id"], entry["symbol"], entry["qty"])
+        status = result["status"]
+
+        if status == "filled":
+            filled_count += 1
+            logger.info(f"  FILLED: {entry['side'].upper()} {entry['qty']} {entry['symbol']}")
+        elif status == "partially_filled":
+            partial_count += 1
+            logger.warning(
+                f"  PARTIAL: {entry['side'].upper()} {entry['symbol']} — "
+                f"filled {result['filled_qty']}/{entry['qty']}"
+            )
+        elif status in ("canceled", "cancelled", "expired"):
+            failed_count += 1
+            logger.warning(
+                f"  CANCELLED/EXPIRED: {entry['side'].upper()} {entry['qty']} {entry['symbol']}"
+            )
+        elif status == "rejected":
+            failed_count += 1
+            logger.error(f"  REJECTED: {entry['side'].upper()} {entry['qty']} {entry['symbol']}")
+        else:
+            # timeout or unknown
+            logger.warning(
+                f"  TIMEOUT: {entry['side'].upper()} {entry['qty']} {entry['symbol']} "
+                f"— order still open after {ORDER_POLL_TIMEOUT_SECS}s"
+            )
+
+    logger.info(
+        f"Fill verification: {filled_count} filled, "
+        f"{partial_count} partial, {failed_count} failed "
+        f"out of {len(submitted_orders)} submitted."
+    )
+    return filled_count > 0 or partial_count > 0
 
 
 def main():
