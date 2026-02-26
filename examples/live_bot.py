@@ -85,10 +85,15 @@ OPTIMIZER_METHOD = os.getenv("OPTIMIZER_METHOD", "hrp")
 MAX_POSITION_WEIGHT = _env_float("MAX_POSITION_WEIGHT", 0.30)
 MAX_PORTFOLIO_VAR_95 = _env_float("MAX_PORTFOLIO_VAR_95", 0.06)
 MAX_DRAWDOWN_LIMIT = _env_float("MAX_DRAWDOWN_LIMIT", 0.15)
-STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.05)
-TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.15)
-ATR_SL_MULTIPLIER = _env_float("ATR_SL_MULTIPLIER", 2.0)
-ATR_TP_MULTIPLIER = _env_float("ATR_TP_MULTIPLIER", 3.0)
+# Bracket defaults are sized for a weekly holding period.  Tighter brackets
+# (e.g., 2x/3x ATR) trigger on normal 1-2 day volatility spikes, prematurely
+# stopping out positions before the 5-day prediction horizon plays out.
+# 3x ATR SL / 5x ATR TP gives ~3:5 risk/reward and fewer whipsaws.
+# Fixed fallback percentages apply when ATR is unavailable.
+STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.07)
+TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.20)
+ATR_SL_MULTIPLIER = _env_float("ATR_SL_MULTIPLIER", 3.0)
+ATR_TP_MULTIPLIER = _env_float("ATR_TP_MULTIPLIER", 5.0)
 SLEEP_AFTER_TRADE_HOURS = _env_int("SLEEP_AFTER_TRADE_HOURS", 12)
 SLEEP_MARKET_CLOSED_HOURS = _env_int("SLEEP_MARKET_CLOSED_HOURS", 1)
 ORDER_POLL_INTERVAL_SECS = _env_int("ORDER_POLL_INTERVAL_SECS", 2)
@@ -1077,9 +1082,14 @@ def main():
 
     # Create execution bridge once — persists equity curve, P&L, and weight
     # history across cycles. Each cycle syncs positions/equity from broker.
+    # Alpaca is commission-free for equities, but we track estimated spread
+    # costs at 2 bps per trade as a proxy for real-world execution costs.
     account = broker.get_account()
+    estimated_spread_bps = _env_float("ESTIMATED_SPREAD_BPS", 0.0002)
     bridge = ExecutionBridge(
-        risk_manager=risk_manager, initial_capital=account.equity, commission_rate=0.0
+        risk_manager=risk_manager,
+        initial_capital=account.equity,
+        commission_rate=estimated_spread_bps,
     )
     _bridge_ref[0] = bridge  # C3 fix: make bridge accessible to SIGTERM handler
 
@@ -1153,8 +1163,36 @@ def main():
                             f"{drawdown_violations[0].message}. Liquidating all positions."
                         )
                         _liquidate_all_positions(broker)
+                        time.sleep(60 * 30)
+                        continue
+
+                    # Non-drawdown violations (VaR, leverage): reduce exposure to
+                    # compliance instead of skipping the cycle entirely.  Scale
+                    # all current positions proportionally so the breached metric
+                    # falls within limits.
+                    var_violations = [v for v in critical_violations if v.rule == "MAX_VAR_95"]
+                    if var_violations and weights is not None and len(weights) > 0:
+                        v = var_violations[0]
+                        # scale_factor = limit / actual, clamped to (0.1, 0.95)
+                        scale = max(0.1, min(0.95, v.limit_value / max(v.metric_value, 1e-9)))
+                        scaled = weights * scale
+                        logger.warning(
+                            f"VaR breach — scaling positions by {scale:.2f} "
+                            f"(VaR {v.metric_value:.2%} → target {v.limit_value:.2%})"
+                        )
+                        _send_alert(
+                            f"[LiveBot] VaR breach: scaling positions by {scale:.2f}. "
+                            f"VaR={v.metric_value:.2%}, limit={v.limit_value:.2%}"
+                        )
+                        bridge.reconcile_target_weights(
+                            target_weights=scaled.to_dict(),
+                            broker=broker,
+                        )
                     else:
-                        logger.warning("Skipping trade cycle due to critical risk violations.")
+                        logger.warning(
+                            "Skipping trade cycle due to critical risk violations "
+                            "(no reduce-to-compliance path available)."
+                        )
                     time.sleep(60 * 30)
                     continue
 

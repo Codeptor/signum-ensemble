@@ -7,7 +7,6 @@ It handles the full pipeline from raw OHLCV data to target portfolio weights.
 import hashlib
 import json
 import logging
-import random
 import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -50,6 +49,11 @@ MIN_HISTORY_DAYS = "1y"
 # inflation (5y) to ~0.3-0.5% (2y) while still providing sufficient
 # training data (~500 dates × 500 tickers = 250k samples).
 TRAINING_LOOKBACK = "2y"
+
+# IC quality gate: if validation IC is below this threshold, the model
+# is too weak to trust for live trading.  Fall back to equal-weight.
+# 0.02 is conservative — typical cross-sectional ICs are 0.03-0.08.
+MIN_VALIDATION_IC = 0.02
 
 # R3-P-9/P-10 fix: resolve paths relative to project root, not CWD
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -392,12 +396,12 @@ def train_model(
             "Use a point-in-time membership table for unbiased backtests."
         )
 
-        # M12 fix: use a random sample instead of the first 100 alphabetically.
-        # Alphabetical slicing (A-D) introduces systematic sector/name bias.
-        # Seed is fixed for reproducibility across runs on the same day.
+        # Train on the full S&P 500 universe.  Previous versions sampled 100
+        # tickers for speed, but this causes distribution mismatch at inference
+        # time when the model scores all ~500 stocks.  LightGBM handles 500
+        # tickers × 2yr daily data (~250k rows) in under a minute.
         all_tickers = fetch_sp500_tickers()
-        random.seed(42)
-        tickers = training_tickers or random.sample(all_tickers, min(100, len(all_tickers)))
+        tickers = training_tickers or all_tickers
         raw = fetch_ohlcv(tickers, period=TRAINING_LOOKBACK)
         long = reshape_ohlcv_wide_to_long(raw)
 
@@ -438,7 +442,14 @@ def train_model(
     # with 5-day embargo to prevent target leakage (same approach as train.py)
     dates = labeled.index.get_level_values(0).unique().sort_values()
     split_date = dates[int(len(dates) * 0.8)]
-    embargo_offset = pd.tseries.offsets.BDay(5)
+    # Embargo must cover the longest feature lookback window to prevent
+    # information leakage from features that straddle the train/val boundary.
+    # Feature set includes 20-day returns, 20-day vol, 20-day Bollinger, and
+    # 60-day moving averages.  22 business days (~1 calendar month) provides
+    # a safe margin above the 20-day features while being conservative enough
+    # not to waste too much data.  (The 60-day MA creates backward dependence
+    # only, not forward leakage, so 22 days is sufficient.)
+    embargo_offset = pd.tseries.offsets.BDay(22)
     embargo_date = split_date + embargo_offset
 
     train_data = labeled.loc[labeled.index.get_level_values(0) <= split_date]
@@ -446,7 +457,8 @@ def train_model(
 
     logger.info(
         f"Training on {len(train_data)} samples (up to {split_date.date()}), "
-        f"validating on {len(val_data)} samples (from {embargo_date.date()})"
+        f"validating on {len(val_data)} samples (from {embargo_date.date()}, "
+        f"embargo=22 business days)"
     )
 
     model = CrossSectionalModel(model_type="lightgbm", feature_cols=available_cols)
@@ -461,6 +473,9 @@ def train_model(
     else:
         logger.warning("No validation data available — training without early stopping")
         model.fit(train_data, target_col="target_5d")
+
+    # Attach IC to model so callers can gate on quality
+    model.validation_ic = ic  # type: ignore[attr-defined]
 
     # --- MLflow tracking (best-effort: never crash training) ---
     try:
@@ -487,6 +502,15 @@ def train_model(
                     mlflow.log_artifact(f.name, artifact_path="feature_importance")
             except Exception as e:
                 logger.debug(f"Could not log feature importance artifact: {e}")
+
+            # Log winsorize bounds alongside the model so rollbacks keep
+            # bounds in sync with the model version that produced them.
+            try:
+                bounds_path = Path("data/models/winsorize_bounds.json")
+                if bounds_path.exists():
+                    mlflow.log_artifact(str(bounds_path), artifact_path="winsorize_bounds")
+            except Exception as e:
+                logger.debug(f"Could not log winsorize bounds artifact: {e}")
 
         logger.info("MLflow run logged successfully for live_lgbm_alpha")
     except Exception as e:
@@ -706,6 +730,22 @@ def get_ml_weights(
     # Step 1: Train model on historical data
     logger.info("Step 1/4: Training model...")
     model = train_model(data_path=training_data_path)
+
+    # IC quality gate: if the model's validation IC is too low, fall back
+    # to equal-weight portfolio.  A weak model is worse than no model.
+    model_ic = getattr(model, "validation_ic", None)
+    if isinstance(model_ic, (int, float)) and model_ic < MIN_VALIDATION_IC:
+        logger.warning(
+            f"Model validation IC ({model_ic:.4f}) below minimum "
+            f"({MIN_VALIDATION_IC}).  Falling back to equal-weight."
+        )
+        # Return equal-weight across top_n current holdings if available,
+        # otherwise return empty (no trades).
+        if current_weights:
+            tickers = list(current_weights.keys())[:top_n]
+            eq_wt = 1.0 / len(tickers) if tickers else 0.0
+            return {t: eq_wt for t in tickers}
+        return {}
 
     # Step 2: Fetch recent data for the full universe to rank
     logger.info("Step 2/4: Fetching recent data for universe ranking...")

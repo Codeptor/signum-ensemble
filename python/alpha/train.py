@@ -89,8 +89,10 @@ def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet") -> "CrossSecti
     # in both train and val sets. Instead, sort dates and split by date.
     dates = labeled.index.get_level_values(0).unique().sort_values()
     split_date = dates[int(len(dates) * 0.8)]
-    # 5-day embargo gap to avoid target leakage across the boundary
-    embargo_offset = pd.tseries.offsets.BDay(5)
+    # 22-day embargo gap to cover the longest feature lookback window
+    # (20-day returns, volatility, Bollinger) and prevent information leakage
+    # from features that straddle the train/val boundary.
+    embargo_offset = pd.tseries.offsets.BDay(22)
     embargo_date = split_date + embargo_offset
 
     train = labeled.loc[labeled.index.get_level_values(0) <= split_date]
@@ -99,7 +101,7 @@ def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet") -> "CrossSecti
     logger.info(
         f"Train: {len(train)} rows up to {split_date.date()}, "
         f"Val: {len(val)} rows from {embargo_date.date()} "
-        f"(5-day embargo)"
+        f"(22-day embargo)"
     )
 
     with mlflow.start_run(run_name="lgbm_alpha158"):

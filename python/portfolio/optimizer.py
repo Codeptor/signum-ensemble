@@ -69,12 +69,16 @@ class PortfolioOptimizer:
         self.current_weights = current_weights
         self.turnover_threshold = turnover_threshold
 
-        # H-HRP fix: apply Ledoit-Wolf shrinkage for small-sample covariance.
-        # R3-O-1 fix: store the estimator so optimizer methods can use it.
+        # Apply Ledoit-Wolf shrinkage unconditionally when enabled.
+        # Sample covariance is always a noisy estimator — shrinkage toward
+        # a structured target (diagonal) always reduces estimation error for
+        # portfolio optimization, regardless of n_obs/n_assets ratio.  The
+        # previous n_obs < n_assets*3 condition meant shrinkage never fired
+        # for the typical 10-stock portfolio with 252 observations.
         n_obs, n_assets = self.returns.shape
         self._shrunk = False
         self._lw_estimator = None  # sklearn LedoitWolf estimator (if applied)
-        if shrink_covariance and n_assets > 2 and n_obs < n_assets * 3:
+        if shrink_covariance and n_assets > 2:
             try:
                 from sklearn.covariance import LedoitWolf
 
