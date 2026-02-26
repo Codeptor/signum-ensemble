@@ -218,11 +218,19 @@ class ExecutionBridge:
             self.cash += trade_value - fill.commission
 
         # Update equity
-        self._update_equity(current_price)
+        self._update_equity({fill.order.ticker: current_price})
 
-    def _update_equity(self, current_price: float) -> None:
-        """Update total equity."""
-        positions_value = sum(pos.market_value(current_price) for pos in self.positions.values())
+    def _update_equity(self, prices: Dict[str, float]) -> None:
+        """Update total equity using per-position prices.
+
+        Args:
+            prices: Dictionary mapping ticker -> current price.
+                    Positions without a price entry are valued at their avg cost.
+        """
+        positions_value = 0.0
+        for ticker, pos in self.positions.items():
+            price = prices.get(ticker, pos.avg_cost)
+            positions_value += pos.market_value(price)
         self.equity = self.cash + positions_value
 
         # Record equity curve point
@@ -237,10 +245,9 @@ class ExecutionBridge:
                 if position.quantity != 0:
                     position.unrealized_pnl = position.quantity * (price - position.avg_cost)
 
-        # Update total equity
+        # Update total equity using all position prices
         if prices:
-            # Use first price for equity calculation (simplified)
-            self._update_equity(list(prices.values())[0])
+            self._update_equity(prices)
 
     def get_portfolio_summary(self) -> Dict:
         """Get current portfolio summary."""
