@@ -319,12 +319,15 @@ class ExecutionBridge:
                 if fill:
                     fills.append(fill)
 
+        # Snapshot equity before the loop so fills don't mutate targets mid-rebalance
+        snapshot_equity = self.equity
+
         for ticker, target_weight in target_weights.items():
             if ticker not in prices:
                 continue
 
             current_price = prices[ticker]
-            target_value = target_weight * self.equity
+            target_value = target_weight * snapshot_equity
             target_quantity = target_value / current_price
 
             # Get current position
