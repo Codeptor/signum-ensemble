@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class DataStore:
-    def __init__(self, connection_string: str = "sqlite:///data/quant.db"):
+    def __init__(self, connection_string: str = "sqlite:///data/quant.db") -> None:
         self.engine = create_engine(connection_string)
         self._dialect = self.engine.dialect.name  # "sqlite", "postgresql", etc.
 
-    def init_db(self):
+    def init_db(self) -> None:
         """Create tables if they don't exist."""
         Base.metadata.create_all(self.engine)
 

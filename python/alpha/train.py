@@ -44,7 +44,7 @@ FEATURE_COLS = [
 ]
 
 
-def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet"):
+def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet") -> "CrossSectionalModel":
     """Full training pipeline: load data -> features -> train -> log to MLflow."""
     raw = pd.read_parquet(data_path)
     raw = reshape_ohlcv_wide_to_long(raw)

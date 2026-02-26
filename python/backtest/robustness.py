@@ -61,7 +61,7 @@ class StressTester:
         self,
         returns: pd.DataFrame,
         weights: Optional[pd.Series] = None,
-    ):
+    ) -> None:
         """
         Args:
             returns: DataFrame with asset returns (columns = assets)

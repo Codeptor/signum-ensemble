@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class DriftDetector:
     """Detects distribution drift between reference and current data."""
 
-    def __init__(self, reference: pd.DataFrame, threshold: float = 0.05):
+    def __init__(self, reference: pd.DataFrame, threshold: float = 0.05) -> None:
         self.reference = reference
         self.threshold = threshold
 
