@@ -182,8 +182,23 @@ class BaseBroker(ABC):
         order_ids = []
         current_positions = {p.symbol: p.qty for p in self.list_positions()}
 
+        # Close positions not in target weights (stale positions)
+        for symbol, qty in current_positions.items():
+            if qty > 1e-6 and symbol not in target_weights:
+                order = BrokerOrder(
+                    symbol=symbol,
+                    side="sell",
+                    qty=qty,
+                    order_type="market",
+                )
+                try:
+                    order_id = self.submit_order(order)
+                    order_ids.append(order_id)
+                except Exception as e:
+                    print(f"Failed to close stale position {symbol}: {e}")
+
         for symbol, target_weight in target_weights.items():
-            if target_weight <= 0:
+            if target_weight < 0:
                 continue
 
             price = self.get_latest_price(symbol)
