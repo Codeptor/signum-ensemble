@@ -195,6 +195,85 @@ class TestTradeValidation:
         assert rr_checks[0].passed is True
 
 
+class TestMaxSingleTradeSize:
+    """Test MAX_SINGLE_TRADE_SIZE check (M4 fix).
+
+    This check warns when a single trade's weight change exceeds
+    max_single_trade_size. Severity is 'warning', not 'critical',
+    so it won't block trades via can_execute_trade().
+    """
+
+    def test_large_trade_from_zero_triggers_warning(self, risk_manager):
+        """Opening a new 20% position exceeds 15% single trade limit."""
+        risk_manager.current_weights = pd.Series({"MSFT": 0.10})
+
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=0.20,
+            current_date="2024-01-01",
+        )
+
+        trade_size_checks = [c for c in checks if c.rule == "MAX_SINGLE_TRADE_SIZE"]
+        assert len(trade_size_checks) == 1
+        assert trade_size_checks[0].passed is False
+        assert trade_size_checks[0].severity == "warning"
+
+    def test_small_trade_passes(self, risk_manager):
+        """A 10% weight change is within 15% limit."""
+        risk_manager.current_weights = pd.Series({"AAPL": 0.10})
+
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=0.20,
+            current_date="2024-01-01",
+        )
+
+        trade_size_checks = [c for c in checks if c.rule == "SINGLE_TRADE_SIZE"]
+        assert len(trade_size_checks) == 1
+        assert trade_size_checks[0].passed is True
+
+    def test_trade_from_existing_position(self, risk_manager):
+        """Reducing from 25% to 5% is a 20% change — exceeds 15% limit."""
+        risk_manager.current_weights = pd.Series({"AAPL": 0.25})
+
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=0.05,
+            current_date="2024-01-01",
+        )
+
+        trade_size_checks = [c for c in checks if c.rule == "MAX_SINGLE_TRADE_SIZE"]
+        assert len(trade_size_checks) == 1
+        assert trade_size_checks[0].passed is False
+
+    def test_no_current_weights_uses_absolute(self, risk_manager):
+        """When current_weights is None, uses absolute new_weight as trade size."""
+        risk_manager.current_weights = None
+
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=0.20,
+            current_date="2024-01-01",
+        )
+
+        trade_size_checks = [c for c in checks if c.rule == "MAX_SINGLE_TRADE_SIZE"]
+        assert len(trade_size_checks) == 1
+        assert trade_size_checks[0].passed is False
+
+    def test_warning_does_not_block_trade(self, risk_manager):
+        """MAX_SINGLE_TRADE_SIZE is severity=warning, so can_execute_trade still True."""
+        risk_manager.current_weights = pd.Series({"MSFT": 0.10})
+
+        can_execute, issues = risk_manager.can_execute_trade(
+            ticker="AAPL",
+            new_weight=0.20,  # 20% trade from 0%, exceeds 15% limit
+            current_date="2024-01-01",
+        )
+
+        # Should still be allowed (warning, not critical)
+        assert can_execute is True
+
+
 class TestCanExecuteTrade:
     """Test can_execute_trade method."""
 

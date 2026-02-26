@@ -179,6 +179,37 @@ class RiskManager:
                 )
             )
 
+        # 2b. Single trade size limit (M4 fix)
+        # Check that the weight *change* from this trade doesn't exceed the
+        # max single trade size. This prevents large sudden position changes
+        # that could move the market or expose us to execution risk.
+        if self.current_weights is not None:
+            old_weight = self.current_weights.get(ticker, 0.0)
+            trade_size = abs(new_weight - old_weight)
+        else:
+            trade_size = abs(new_weight)
+        if trade_size > self.limits.max_single_trade_size:
+            checks.append(
+                RiskCheck(
+                    passed=False,
+                    rule="MAX_SINGLE_TRADE_SIZE",
+                    message=f"Trade size {trade_size:.1%} exceeds single-trade limit of "
+                    f"{self.limits.max_single_trade_size:.1%}",
+                    severity="warning",
+                    metric_value=trade_size,
+                    limit_value=self.limits.max_single_trade_size,
+                )
+            )
+        else:
+            checks.append(
+                RiskCheck(
+                    passed=True,
+                    rule="SINGLE_TRADE_SIZE",
+                    message=f"Trade size {trade_size:.1%} within single-trade limit",
+                    severity="info",
+                )
+            )
+
         # 3. Risk/Reward ratio
         if risk_amount > 0:
             rr_ratio = expected_return / risk_amount

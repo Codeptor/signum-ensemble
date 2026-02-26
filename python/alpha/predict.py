@@ -191,9 +191,25 @@ def fetch_universe(tickers: list[str], period: str = MIN_HISTORY_DAYS) -> pd.Dat
 
 
 def compute_features(long_df: pd.DataFrame) -> pd.DataFrame:
-    """Run the full feature pipeline on long-format OHLCV data."""
+    """Run the full feature pipeline on long-format OHLCV data.
+
+    Includes macro features (VIX, term spread) when the data file exists,
+    so that inference-time features match what the model was trained on.
+    """
     featured = compute_alpha_features(long_df)
     featured = compute_cross_sectional_features(featured)
+
+    # Merge macro features at inference time (same as train_model does)
+    # This prevents KeyError when the model expects 'vix' but it's missing.
+    macro_path = Path("data/raw/macro_indicators.parquet")
+    if macro_path.exists():
+        from python.alpha.features import merge_macro_features
+
+        try:
+            featured = merge_macro_features(featured, str(macro_path))
+        except Exception as e:
+            logger.warning(f"Could not merge macro features at inference: {e}")
+
     return featured
 
 
@@ -297,14 +313,29 @@ def rank_stocks(
     """Use the trained model to rank stocks and return top N tickers.
 
     Only uses the most recent date's cross-section for ranking.
+
+    Handles missing features gracefully: if the model was trained with
+    features that aren't available at inference time (e.g. 'vix' when
+    macro data is unavailable), those features are filled with 0.0 and
+    a warning is logged. This prevents KeyError crashes in production.
     """
     # Get the latest date's data
     latest_date = featured_df.index.get_level_values(0).max()
     latest = featured_df.loc[latest_date].copy()
 
-    # Ensure all feature columns exist and drop NaN rows
+    # Check which model features are available vs missing
     available_cols = [c for c in model.feature_cols if c in latest.columns]
-    latest = latest.dropna(subset=available_cols)
+    missing_cols = [c for c in model.feature_cols if c not in latest.columns]
+
+    if missing_cols:
+        logger.warning(
+            f"Missing {len(missing_cols)} features at inference time: {missing_cols}. "
+            f"Filling with 0.0 — predictions may be degraded."
+        )
+        for col in missing_cols:
+            latest[col] = 0.0
+
+    latest = latest.dropna(subset=model.feature_cols)
 
     if len(latest) == 0:
         logger.error("No valid data for prediction on latest date")
@@ -326,6 +357,7 @@ def optimize_weights(
     method: str = "hrp",
     current_weights: dict[str, float] | None = None,
     turnover_threshold: float = 0.20,
+    max_weight: float | None = None,
 ) -> dict[str, float]:
     """Run portfolio optimization on selected tickers.
 
@@ -336,6 +368,8 @@ def optimize_weights(
         current_weights: Current portfolio weights for turnover-aware optimization.
             If provided, rebalancing is skipped when turnover < turnover_threshold.
         turnover_threshold: Minimum turnover to justify rebalancing (default 20%).
+        max_weight: Optional cap on individual asset weight (e.g. 0.30).
+            Passed through to PortfolioOptimizer for post-optimization capping.
 
     Returns a dict of {ticker: weight}.
     """
@@ -362,6 +396,7 @@ def optimize_weights(
 
     optimizer = PortfolioOptimizer(
         prices,
+        max_weight=max_weight,
         current_weights=cw_series,
         turnover_threshold=turnover_threshold,
     )
@@ -401,6 +436,7 @@ def get_ml_weights(
     training_data_path: str | None = None,
     current_weights: dict[str, float] | None = None,
     turnover_threshold: float = 0.20,
+    max_weight: float | None = None,
 ) -> dict[str, float]:
     """End-to-end pipeline: train model -> rank S&P 500 -> optimize top N.
 
@@ -412,6 +448,7 @@ def get_ml_weights(
         training_data_path: Optional path to cached training data.
         current_weights: Current portfolio weights for turnover-aware optimization.
         turnover_threshold: Minimum turnover to justify rebalancing.
+        max_weight: Optional cap on individual asset weight (e.g. 0.30).
 
     Returns dict of {ticker: target_weight}.
     """
@@ -445,6 +482,7 @@ def get_ml_weights(
         method=method,
         current_weights=current_weights,
         turnover_threshold=turnover_threshold,
+        max_weight=max_weight,
     )
 
     logger.info(f"=== ML Pipeline complete: {len(weights)} positions ===")

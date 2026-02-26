@@ -136,7 +136,7 @@ class MockBroker(BaseBroker):
 def account():
     return BrokerAccount(
         account_id="test-001",
-        cash=50_000.0,
+        cash=100_000.0,
         portfolio_value=100_000.0,
         buying_power=100_000.0,
         equity=100_000.0,
@@ -254,7 +254,19 @@ class TestRunTradingCycleIntegration:
     def test_stale_orders_cancelled_but_bracket_legs_kept(
         self, _sleep, mock_ml, account, prices, risk_manager
     ):
-        """Open orders without parent_order_id are cancelled; bracket legs are kept."""
+        """Stale order cleanup preserves bracket legs; SL/TP replacement cancels them later.
+
+        The stale-order cancellation step (step 1 of run_trading_cycle) checks
+        ``parent_order_id`` and skips bracket child legs.  However, when a new
+        buy order fills for the same symbol, ``_cancel_existing_sl_tp_orders``
+        correctly cancels the old SL/TP so fresh protective orders can be
+        attached at the new fill price.  This test verifies the full lifecycle:
+
+        1. Regular (non-bracket) stale order → cancelled in step 1.
+        2. Bracket SL leg → preserved in step 1 (has parent_order_id).
+        3. After the new MSFT buy fills → old bracket SL cancelled and new
+           SL/TP orders submitted at the updated fill price.
+        """
         # Simulate open orders — one regular, one bracket leg
         regular_order = BrokerOrder(
             symbol="AAPL",
@@ -280,10 +292,22 @@ class TestRunTradingCycleIntegration:
         target_weights = {"AAPL": 0.5, "MSFT": 0.5}
         mock_ml.return_value = target_weights
 
+        # Include an existing MSFT position so the bracket SL leg
+        # for MSFT is NOT orphaned (H3 cleanup runs before stale order cancellation)
+        msft_position = BrokerPosition(
+            symbol="MSFT",
+            qty=5.0,
+            avg_entry_price=400.0,
+            market_value=2000.0,
+            unrealized_pl=0.0,
+            unrealized_plpc=0.0,
+        )
+
         broker = MockBroker(
             account=account,
             prices=prices,
             open_orders=open_orders,
+            positions=[msft_position],
         )
         bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=100_000.0)
 
@@ -291,10 +315,23 @@ class TestRunTradingCycleIntegration:
 
         run_trading_cycle(broker, risk_manager, bridge)
 
-        # Regular order should be cancelled
+        # Regular stale order must be cancelled (no parent_order_id)
         assert "order-regular" in broker.cancelled_order_ids
-        # Bracket SL leg should NOT be cancelled
-        assert "order-sl-child" not in broker.cancelled_order_ids
+
+        # The bracket SL is eventually cancelled — not by stale-order cleanup
+        # (which preserves bracket legs), but by _cancel_existing_sl_tp_orders
+        # when the new MSFT buy fills and fresh SL/TP orders are attached.
+        assert "order-sl-child" in broker.cancelled_order_ids
+
+        # Verify new SL/TP orders were submitted for MSFT after the buy fill
+        msft_sell_orders = [
+            o for o in broker.submitted_orders if o.symbol == "MSFT" and o.side == "sell"
+        ]
+        # Should have at least a new stop-loss and take-profit
+        sl_orders = [o for o in msft_sell_orders if o.order_type == "stop"]
+        tp_orders = [o for o in msft_sell_orders if o.order_type == "limit"]
+        assert len(sl_orders) >= 1, "Expected new SL order for MSFT after buy fill"
+        assert len(tp_orders) >= 1, "Expected new TP order for MSFT after buy fill"
 
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)
@@ -359,7 +396,8 @@ class TestFillVerification:
             BrokerOrder(symbol="MSFT", side="buy", qty=5.0, order_type="market")
         )
         # Script: 3 pending polls, then filled
-        broker._fill_script[oid] = ["new", "new", "partially_filled", "filled"]
+        # Note: partially_filled is a terminal state (Bug 3 fix), so use 'new' for pending
+        broker._fill_script[oid] = ["new", "new", "new", "filled"]
 
         from examples.live_bot import _verify_order_fill
 
@@ -479,7 +517,7 @@ class TestBridgeBrokerSync:
         """Bridge equity is set from broker account before reconciliation."""
         account = BrokerAccount(
             account_id="test-002",
-            cash=30_000.0,
+            cash=80_000.0,
             portfolio_value=80_000.0,
             buying_power=80_000.0,
             equity=80_000.0,

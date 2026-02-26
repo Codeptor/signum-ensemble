@@ -28,6 +28,43 @@ class TestBrokerOrder:
         assert order.order_type == "market"
         assert order.time_in_force == "day"
 
+    def test_filled_qty_defaults_to_none(self):
+        """filled_qty field should default to None."""
+        order = BrokerOrder(
+            symbol="AAPL",
+            side="buy",
+            qty=100.0,
+            order_type="market",
+        )
+        assert order.filled_qty is None
+
+    def test_filled_qty_can_be_set(self):
+        """filled_qty should accept a float value."""
+        order = BrokerOrder(
+            symbol="AAPL",
+            side="buy",
+            qty=100.0,
+            order_type="market",
+            filled_qty=42.0,
+        )
+        assert order.filled_qty == 42.0
+
+    def test_filled_qty_partial_fill_scenario(self):
+        """Simulate a partial fill: filled_qty < qty."""
+        order = BrokerOrder(
+            symbol="TSLA",
+            side="buy",
+            qty=50.0,
+            order_type="limit",
+            limit_price=200.0,
+            status="partially_filled",
+            filled_qty=23.0,
+            filled_avg_price=199.50,
+        )
+        assert order.qty == 50.0
+        assert order.filled_qty == 23.0
+        assert order.filled_avg_price == 199.50
+
 
 class TestBrokerPosition:
     """Test BrokerPosition dataclass."""

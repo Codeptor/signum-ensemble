@@ -276,6 +276,9 @@ class AlpacaBroker(BaseBroker):
                     if getattr(order, "filled_avg_price", None)
                     else None
                 ),
+                filled_qty=(
+                    float(order.filled_qty) if getattr(order, "filled_qty", None) else None
+                ),
             )
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
@@ -303,6 +306,10 @@ class AlpacaBroker(BaseBroker):
                     parent_order_id=getattr(o, "parent_order_id", None),
                     status=o.status,
                     order_class=getattr(o, "order_class", None),
+                    filled_avg_price=(
+                        float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None
+                    ),
+                    filled_qty=(float(o.filled_qty) if getattr(o, "filled_qty", None) else None),
                     created_at=getattr(o, "created_at", None),
                 )
                 for o in orders

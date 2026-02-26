@@ -111,3 +111,94 @@ class TestModelVersioning:
 
         loaded = _load_cached_model()
         assert loaded is not None
+
+
+class TestMaxWeightPassthrough:
+    """Test that max_weight parameter is passed through correctly (M8 fix).
+
+    optimize_weights() and get_ml_weights() should pass max_weight to
+    PortfolioOptimizer for post-optimization capping.
+    """
+
+    def test_optimize_weights_accepts_max_weight(self):
+        """optimize_weights signature accepts max_weight parameter."""
+        import inspect
+        from python.alpha.predict import optimize_weights
+
+        sig = inspect.signature(optimize_weights)
+        assert "max_weight" in sig.parameters
+        # Default should be None
+        assert sig.parameters["max_weight"].default is None
+
+    def test_get_ml_weights_accepts_max_weight(self):
+        """get_ml_weights signature accepts max_weight parameter."""
+        import inspect
+        from python.alpha.predict import get_ml_weights
+
+        sig = inspect.signature(get_ml_weights)
+        assert "max_weight" in sig.parameters
+        assert sig.parameters["max_weight"].default is None
+
+
+class TestComputeFeaturesIncludesMacro:
+    """Test that compute_features merges macro features (Bug 1 fix).
+
+    At inference time, compute_features must produce the same columns
+    as train_model, including macro features like 'vix' and 'term_spread'.
+    """
+
+    def test_compute_features_attempts_macro_merge(self, monkeypatch):
+        """compute_features should attempt to merge macro features when file exists."""
+        from unittest.mock import patch, MagicMock
+        import python.alpha.predict as predict_mod
+
+        # We mock the entire chain since we can't easily create valid long_df
+        mock_compute_alpha = MagicMock(return_value=MagicMock())
+        mock_compute_cross = MagicMock(return_value=MagicMock())
+
+        monkeypatch.setattr(predict_mod, "compute_alpha_features", mock_compute_alpha)
+        monkeypatch.setattr(predict_mod, "compute_cross_sectional_features", mock_compute_cross)
+
+        # Mock Path.exists to say macro file exists
+        with patch("python.alpha.predict.Path") as MockPath:
+            mock_path_instance = MagicMock()
+            mock_path_instance.exists.return_value = True
+            MockPath.return_value = mock_path_instance
+
+            with patch("python.alpha.features.merge_macro_features") as mock_merge:
+                mock_merge.return_value = mock_compute_cross.return_value
+                predict_mod.compute_features(MagicMock())
+
+                mock_merge.assert_called_once()
+
+
+class TestRankStocksFillsMissingFeatures:
+    """Test that rank_stocks fills missing features with 0.0 (Bug 1 / H6 fix)."""
+
+    def test_missing_features_are_filled(self):
+        """rank_stocks should not crash when model expects features not in data."""
+        import pandas as pd
+        import numpy as np
+        from unittest.mock import MagicMock
+
+        from python.alpha.predict import rank_stocks
+
+        # Create a model mock that expects 'vix' and 'momentum'
+        mock_model = MagicMock()
+        mock_model.feature_cols = ["momentum", "vix"]
+        mock_model.predict.return_value = np.array([0.5, 0.3])
+
+        # Create featured_df with only 'momentum' (missing 'vix')
+        dates = pd.to_datetime(["2024-01-01", "2024-01-01"])
+        tickers = ["AAPL", "MSFT"]
+        idx = pd.MultiIndex.from_arrays([dates, tickers])
+        df = pd.DataFrame(
+            {"momentum": [0.1, 0.2], "ticker": ["AAPL", "MSFT"]},
+            index=idx,
+        )
+
+        # Should not crash
+        result = rank_stocks(mock_model, df, top_n=2)
+
+        assert isinstance(result, list)
+        assert len(result) == 2

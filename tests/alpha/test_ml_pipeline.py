@@ -323,6 +323,7 @@ class TestGetMlWeightsOrchestration:
             method="hrp",
             current_weights=None,
             turnover_threshold=0.2,
+            max_weight=None,
         )
 
     @patch("python.alpha.predict.rank_stocks")

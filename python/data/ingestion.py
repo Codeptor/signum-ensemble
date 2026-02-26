@@ -22,6 +22,10 @@ from python.data.config import DEFAULT_INTERVAL, DEFAULT_PERIOD, RAW_DIR
 
 logger = logging.getLogger(__name__)
 
+# Default timeout in seconds for yfinance HTTP calls (M6 fix)
+# Prevents indefinite hangs from network issues or API throttling.
+YFINANCE_TIMEOUT = 30
+
 
 @retry(
     stop=stop_after_attempt(3),
@@ -49,7 +53,14 @@ def fetch_ohlcv(
 ) -> pd.DataFrame:
     """Download OHLCV data for given tickers via yfinance."""
     logger.info(f"Fetching OHLCV for {len(tickers)} tickers, period={period}")
-    df = yf.download(tickers, period=period, interval=interval, group_by="ticker", threads=True)
+    df = yf.download(
+        tickers,
+        period=period,
+        interval=interval,
+        group_by="ticker",
+        threads=True,
+        timeout=YFINANCE_TIMEOUT,
+    )
 
     # --- NaN validation (Finding #28) ---
     if df.empty:
@@ -84,7 +95,9 @@ def fetch_fred_macro() -> pd.DataFrame:
     }
     frames = {}
     for ticker, name in macro_tickers.items():
-        data = yf.download(ticker, period=DEFAULT_PERIOD, interval=DEFAULT_INTERVAL)
+        data = yf.download(
+            ticker, period=DEFAULT_PERIOD, interval=DEFAULT_INTERVAL, timeout=YFINANCE_TIMEOUT
+        )
         close = data["Close"]
         # yfinance may return DataFrame instead of Series; squeeze to 1-D
         if isinstance(close, pd.DataFrame):
