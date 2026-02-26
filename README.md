@@ -74,7 +74,7 @@ quant-platform/
 │   └── matching-engine/ # Lock-free order book with Criterion benchmarks
 ├── infra/
 │   └── docker-compose.yml  # TimescaleDB, Redis, MLflow
-├── tests/               # 20 tests
+├── tests/               # 415+ tests
 ├── dvc.yaml             # Reproducible pipeline DAG
 └── Makefile             # Build orchestration
 ```
@@ -96,48 +96,42 @@ make backtest  # Walk-forward backtest with CPCV
 make dashboard # Launch Dash risk dashboard on :8050
 
 # Tests
-pytest tests/ -v       # Python (122 passed)
-cargo test             # Rust (10 passed)
-cargo bench            # Criterion benchmarks
+uv run pytest tests/ -q  # Python (415+ passed)
+cargo test               # Rust (10 passed)
+cargo bench              # Criterion benchmarks
+```
 
-## Live Trading Setup
+## Paper Trading Setup
 
-### 1. Alpaca Paper Trading (Free)
 ```bash
-# Sign up at https://alpaca.markets
-# Get API keys from: https://app.alpaca.markets/paper/dashboard/overview
-export ALPACA_API_KEY="your_key"
-export ALPACA_API_SECRET="your_secret"
+# 1. Install dependencies
+uv venv .venv && source .venv/bin/activate
+uv pip install -e ".[all]"
 
-# Install broker dependencies
-pip install alpaca-trade-api
+# 2. Configure Alpaca credentials
+#    Sign up at https://alpaca.markets (free paper trading account)
+#    Get keys from: https://app.alpaca.markets/paper/dashboard/overview
+cp .env.example .env
+# Edit .env: set ALPACA_API_KEY and ALPACA_API_SECRET
 
-# Run paper trading example
-python examples/live_trading_example.py
+# 3. Dry run (full ML pipeline, no orders submitted)
+source .env && uv run python examples/dry_run.py
+
+# 4. Start paper trading bot
+source .env && ./run_live_bot.sh
+
+# 5. Production deployment (systemd)
+# See deploy/VPS_DEPLOYMENT.md for full guide
+sudo cp deploy/signum-bot.service /etc/systemd/system/
+sudo systemctl enable --now signum-bot
 ```
 
-### 2. Broker Factory Usage
-```python
-from python.brokers.factory import BrokerFactory
+The bot rebalances weekly (Wednesdays by default), running the full ML pipeline each cycle:
+scrape S&P 500 tickers, fetch 2yr OHLCV from yfinance, compute 23 alpha features,
+train LightGBM with Huber loss, rank stocks by predicted 5-day return, select top 10,
+optimize weights via HRP, execute orders via Alpaca with ATR-based SL/TP brackets.
 
-# Create Alpaca paper trading instance
-broker = BrokerFactory.create("alpaca", paper_trading=True)
-broker.connect()
-
-# Get account info
-account = broker.get_account()
-print(f"Cash: ${account.cash:,.2f}")
-
-# Submit order
-from python.brokers.base import BrokerOrder
-order = BrokerOrder(symbol="AAPL", side="buy", qty=10, order_type="market")
-order_id = broker.submit_order(order)
-
-# List positions
-positions = broker.list_positions()
-for pos in positions:
-    print(f"{pos.symbol}: {pos.qty} shares")
-```
+See `docs/PAPER_TRADING_READINESS.md` for the full readiness assessment and known limitations.
 
 
 ## Key Components
@@ -278,11 +272,33 @@ for pos in positions:
 - **Position Sync**: Automatic reconciliation with broker
 - **Real-time Data**: Live market data and execution
 
-### Test Coverage
-- **122 tests** (up from 20)
-- 100% coverage of new risk metrics
-- Integration tests for risk checks and execution
-- Brinson attribution tests
-- Broker integration tests
+### Audit Round 2 (February 2026)
 
-**Next Steps**: C extensions for large portfolios (500+ assets), Interactive Brokers integration, options support, real-time data streaming.
+Two parallel audits (6 agents) identified 56 additional findings across execution and ML pipeline layers. All resolved:
+
+**Execution layer** (28 fixes):
+- OCO order construction, partial fill reconciliation, timeout handling
+- Risk manager severity levels, weight initialization, sector exposure
+- Liquidation safety, renorm-clamp stability, caution mode scaling
+- Timezone consistency (NY for rebalance, UTC for order IDs)
+- Batch price fetch, stale position close bypass, atomic state write
+
+**ML pipeline** (28 fixes):
+- Train/inference winsorization bounds consistency
+- Target winsorization removed (Huber loss handles outliers)
+- Date-space purged k-fold with calendar-day purge gap
+- Spearman rank IC (not Pearson) for cross-sectional signals
+- Geometric Sharpe with risk-free rate subtraction (centralized)
+- Net-exposure gate (reduces longs when median prediction < 0)
+- Ledoit-Wolf covariance shrinkage for HRP
+- Stale VIX detection and OR-based halt de-escalation
+- Stationary block bootstrap (preserves autocorrelation)
+
+### Test Coverage
+- **415+ tests** (up from 20 at project start)
+- Integration tests for full pipeline (data -> signal -> portfolio -> risk)
+- Live trading path tests (MockBroker -> ExecutionBridge -> trading cycle)
+- ML orchestration tests (fetch -> features -> rank -> optimize)
+- 8 audit-specific test coverage gaps filled (short positions, OCO top-up, atomic write, liquidation failure, has-traded-today, position flip, no-price skip, renorm-clamp)
+
+**Next Steps**: Merge audit branches to `main`, begin paper trading, migrate from deprecated `alpaca-trade-api` to `alpaca-py`, add drift detection to live loop, implement point-in-time index membership for production backtests.
