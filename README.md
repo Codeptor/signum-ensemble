@@ -138,7 +138,7 @@ positions = broker.list_positions()
 for pos in positions:
     print(f"{pos.symbol}: {pos.qty} shares")
 ```
-```
+
 
 ## Key Components
 
