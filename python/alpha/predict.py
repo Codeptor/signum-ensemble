@@ -31,11 +31,20 @@ from python.portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
 
-# Minimum history needed for feature computation (60-day MA + 20-day rolling)
-MIN_HISTORY_DAYS = "6mo"
+# Minimum history needed for feature computation (60-day MA + 20-day rolling).
+# H-HRP fix: increased from 6mo to 1y.  HRP on 6 months of 10-stock data
+# produces noisy correlation estimates; 1 year provides ~252 observations
+# which is sufficient for stable hierarchical clustering.
+MIN_HISTORY_DAYS = "1y"
 
-# Training lookback — how much S&P 500 history to train the model on
-TRAINING_LOOKBACK = "5y"
+# Training lookback — how much S&P 500 history to train the model on.
+# H-SURV fix: reduced from 5y to 2y.  With 5y lookback using *current*
+# S&P 500 constituents, survivorship bias inflates apparent performance:
+# companies removed due to bankruptcy/delisting/M&A during the window are
+# excluded.  2y reduces the bias magnitude from ~1-2% annual return
+# inflation (5y) to ~0.3-0.5% (2y) while still providing sufficient
+# training data (~500 dates × 500 tickers = 250k samples).
+TRAINING_LOOKBACK = "2y"
 
 # Model cache directory
 MODEL_CACHE_DIR = Path("data/models")
@@ -364,7 +373,43 @@ def rank_stocks(
 
     # Predict raw scores (not ranks — we just need to sort)
     scores = model.predict(latest)
-    score_series = pd.Series(scores, index=latest["ticker"].values)
+
+    # H-TICKER fix: resolve ambiguity between MultiIndex level and column.
+    # After .loc[latest_date], ticker may be:
+    #   (a) a column named "ticker" (from compute_alpha_features), OR
+    #   (b) the DataFrame index (from MultiIndex level-1).
+    # Use whichever is available, preferring the column if both exist.
+    if "ticker" in latest.columns:
+        ticker_labels = latest["ticker"].values
+    elif hasattr(latest.index, "name") and latest.index.name == "ticker":
+        ticker_labels = latest.index.values
+    else:
+        # Last resort: try level-1 values if it's still a MultiIndex
+        ticker_labels = (
+            latest.index.get_level_values(-1).values
+            if isinstance(latest.index, pd.MultiIndex)
+            else latest.index.values
+        )
+    score_series = pd.Series(scores, index=ticker_labels)
+
+    # H-SIGNAL fix: the model predicts market-neutral residual returns, but
+    # the portfolio is long-only.  When the median prediction is negative
+    # (i.e. the model expects most stocks to underperform), blindly buying
+    # the "least negative" stocks still results in losses.  Gate net
+    # exposure: if median < 0, reduce top_n proportionally.
+    median_score = float(score_series.median())
+    if median_score < 0:
+        # Scale down: e.g. if median = -0.01 and 75th pctl = 0.005,
+        # only keep stocks with clearly positive predicted residual.
+        n_positive = int((score_series > 0).sum())
+        effective_n = max(1, min(top_n, n_positive))
+        if effective_n < top_n:
+            logger.warning(
+                f"H-SIGNAL: median prediction={median_score:.4f} < 0, "
+                f"reducing top_n from {top_n} to {effective_n} "
+                f"({n_positive} stocks have positive predicted return)"
+            )
+            top_n = effective_n
 
     # Take top N by predicted return
     top = score_series.nlargest(top_n)

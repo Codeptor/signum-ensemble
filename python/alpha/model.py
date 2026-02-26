@@ -82,8 +82,12 @@ class CrossSectionalModel:
                 val_features, val_y = val_features[val_mask], val_y[val_mask]
                 if len(val_y) > 0:
                     fit_kwargs["eval_set"] = [(val_features, val_y)]
+                    # M-EARLYSTOP fix: stopping_rounds=10 was too aggressive,
+                    # causing premature termination before the model fully
+                    # converged on noisy cross-sectional equity targets.
+                    # Increased to 50 to allow more patience.
                     fit_kwargs["callbacks"] = [
-                        lgb.early_stopping(stopping_rounds=10, verbose=True),
+                        lgb.early_stopping(stopping_rounds=50, verbose=True),
                         lgb.log_evaluation(period=50),
                     ]
 

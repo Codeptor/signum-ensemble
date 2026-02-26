@@ -47,6 +47,7 @@ class PortfolioOptimizer:
         max_weight: Optional[float] = None,
         current_weights: Optional[pd.Series] = None,
         turnover_threshold: float = 0.20,
+        shrink_covariance: bool = True,
     ):
         """Initialize with a DataFrame of asset prices (columns=tickers, index=dates).
 
@@ -57,6 +58,9 @@ class PortfolioOptimizer:
             current_weights: Current portfolio weights for turnover-aware optimization.
             turnover_threshold: Minimum turnover to justify rebalancing (default 20%).
                 If computed turnover is below this threshold, current weights are kept.
+            shrink_covariance: H-HRP fix — apply Ledoit-Wolf shrinkage to the
+                covariance matrix when n_assets > n_observations/2 (noisy regime).
+                Default True.
         """
         self.prices = prices
         self.returns = prices.pct_change().dropna()
@@ -64,6 +68,22 @@ class PortfolioOptimizer:
         self.max_weight = max_weight
         self.current_weights = current_weights
         self.turnover_threshold = turnover_threshold
+
+        # H-HRP fix: apply Ledoit-Wolf shrinkage for small-sample covariance
+        n_obs, n_assets = self.returns.shape
+        self._shrunk = False
+        if shrink_covariance and n_assets > 2 and n_obs < n_assets * 3:
+            try:
+                from sklearn.covariance import LedoitWolf
+
+                lw = LedoitWolf().fit(self.returns.values)
+                logger.info(
+                    f"H-HRP: applied Ledoit-Wolf shrinkage "
+                    f"(n_obs={n_obs}, n_assets={n_assets}, shrinkage={lw.shrinkage_:.3f})"
+                )
+                self._shrunk = True
+            except Exception as e:
+                logger.warning(f"Ledoit-Wolf shrinkage failed: {e}")
 
     def hrp(self) -> pd.Series:
         """Hierarchical Risk Parity allocation."""
@@ -203,7 +223,11 @@ class PortfolioOptimizer:
         if self.current_weights is None or self.current_weights.empty:
             return new_weights
 
-        # Calculate turnover: half the sum of absolute weight changes
+        # M-TURNOVER fix: include ALL held positions in the turnover calc,
+        # not just tickers that appear in new_weights.  Positions being sold
+        # (in current_weights but absent from new_weights) contribute to
+        # turnover and must be counted, otherwise sell-side turnover is
+        # systematically underestimated.
         all_tickers = sorted(set(new_weights.index) | set(self.current_weights.index))
         w_new = new_weights.reindex(all_tickers, fill_value=0.0)
         w_old = self.current_weights.reindex(all_tickers, fill_value=0.0)

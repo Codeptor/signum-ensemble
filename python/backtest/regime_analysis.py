@@ -142,9 +142,11 @@ def compute_regime_metrics(
     vol = float(returns.std() * np.sqrt(trading_days))
     daily_rf = risk_free_rate / trading_days
     excess = returns - daily_rf
-    sharpe = (
-        float(excess.mean() / returns.std() * np.sqrt(trading_days)) if returns.std() > 0 else 0.0
-    )
+    # M-REGIME-SHARPE fix: denominator must be excess.std(), not returns.std().
+    # Using returns.std() ignores the variance of the risk-free subtraction
+    # (minor for constant rf, but inconsistent with standard Sharpe definition).
+    excess_std = excess.std()
+    sharpe = float(excess.mean() / excess_std * np.sqrt(trading_days)) if excess_std > 0 else 0.0
 
     # Max drawdown
     cumulative = (1 + returns).cumprod()

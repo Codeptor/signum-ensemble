@@ -79,11 +79,18 @@ class RiskEngine:
         return vol
 
     def downside_deviation(self, threshold: float = 0, annualized: bool = True) -> float:
-        """Standard deviation of returns below threshold."""
-        downside = self.portfolio_returns[self.portfolio_returns < threshold]
-        if len(downside) == 0:
-            return 0.0
-        dd = downside.std()
+        """Semi-deviation of returns below threshold (H-SORTINO fix).
+
+        H-SORTINO fix: the old implementation computed ``std()`` over only
+        the negative returns, which uses ``n_downside`` in the denominator.
+        The correct formula squares the *below-threshold* shortfalls and
+        averages over *all* observations (n_total), then takes the square
+        root.  Using n_downside inflates the Sortino ratio by under-
+        estimating downside risk.
+        """
+        excess = self.portfolio_returns - threshold
+        downside_sq = np.minimum(excess, 0.0) ** 2
+        dd = float(np.sqrt(downside_sq.mean()))
         if annualized:
             dd *= np.sqrt(self.ann_factor)
         return dd

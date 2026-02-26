@@ -99,12 +99,23 @@ class RegimeDetector:
             regime = "normal"
 
         # --- Hysteresis: sticky de-escalation ---
-        # Only allow de-escalation if we've crossed below threshold - band
+        # Only allow de-escalation if we've crossed below threshold - band.
+        #
+        # M-HYSTERESIS fix: the original AND logic for halt→caution required
+        # BOTH VIX and drawdown to clear their bands before de-escalating.
+        # During prolonged drawdowns (e.g. 2022 bear), VIX can normalize
+        # while drawdown persists, locking the strategy in halt for months.
+        # Changed to: if VIX normalizes (below caution-band), allow
+        # de-escalation to caution even if drawdown persists.  Full
+        # de-escalation to normal still requires both to clear.
         if prev == "halt" and regime != "halt":
-            # Stay in halt until VIX drops below halt-band AND drawdown below halt-band
             vix_clear = vix <= (self.vix_halt - self.vix_hysteresis)
             dd_clear = spy_drawdown <= (self.drawdown_halt - self.drawdown_hysteresis)
-            if not (vix_clear and dd_clear):
+            if vix_clear or dd_clear:
+                # At least one signal has cleared — allow partial de-escalation
+                # to caution (not straight to normal)
+                regime = "caution"
+            else:
                 regime = "halt"
         elif prev == "caution" and regime == "normal":
             # Stay in caution until VIX drops below caution-band AND drawdown below caution-band
@@ -220,7 +231,11 @@ def _extract_close_series(df: pd.DataFrame) -> pd.Series:
 def fetch_vix() -> Optional[float]:
     """Fetch current VIX level from Yahoo Finance.
 
-    Returns None if the fetch fails (caller should use a safe default).
+    M-VIX fix: warns if the latest VIX observation is >1 trading day old
+    (e.g. stale data on Mondays or during market holidays), and returns a
+    neutral default (20.0) if the data is >3 trading days stale.
+
+    Returns None if the fetch fails entirely (caller should use a safe default).
     """
     try:
         import yfinance as yf
@@ -228,6 +243,29 @@ def fetch_vix() -> Optional[float]:
         vix_data = yf.download("^VIX", period="5d", interval="1d", progress=False)
         if vix_data is not None and len(vix_data) > 0:
             close = _extract_close_series(vix_data)
+
+            # M-VIX fix: check staleness of the latest VIX observation
+            last_date = close.index[-1]
+            if hasattr(last_date, "date"):
+                last_date = last_date.date()
+            import datetime
+
+            today = datetime.date.today()
+            days_stale = (today - last_date).days
+            # Weekends are expected (2 days stale on Monday), but >3 calendar
+            # days suggests a data gap or outage.
+            if days_stale > 3:
+                logger.warning(
+                    f"M-VIX: latest VIX observation is {days_stale} days old "
+                    f"({last_date}). Returning neutral default (20.0)."
+                )
+                return 20.0
+            elif days_stale > 1:
+                logger.info(
+                    f"M-VIX: latest VIX observation is {days_stale} days old "
+                    f"({last_date}) — likely weekend/holiday, using as-is."
+                )
+
             vix = float(close.iloc[-1])
             logger.info(f"Current VIX: {vix:.1f}")
             return vix

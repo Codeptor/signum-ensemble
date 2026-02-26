@@ -164,9 +164,9 @@ Both branch from `main` at commit `152b865`.
 - [x] Tests: T-SHORT, T-OCO-TOPUP, T-ATOMIC, T-LIQFAIL, T-HASDAY, T-FLIP, T-NOPRICE, T-RENORM
 
 ### OpenCode Status
-- [ ] Phase 1: C-WINS, C-TARGET, C-NAN, C-CORR, C-PURGE, C-SHARPE
-- [ ] Phase 2: H-ICVAL, H-PEARSON, H-YFIN, H-WIKI, H-SURV, H-SIGNAL, H-SORTINO, H-WINSGLOB, H-MULTIIDX, H-MACRO, H-TICKER, H-HRP
-- [ ] Phase 3: M-BOOTSTRAP, M-EARLYSTOP, M-SHARPE3, M-REGIME-SHARPE, M-ATR, M-MACROPATH, M-LOGMSG, M-VIX, M-HYSTERESIS, M-TURNOVER
+- [x] Phase 1: C-WINS, C-TARGET, C-NAN, C-CORR, C-PURGE, C-SHARPE (commit 7de00a7)
+- [x] Phase 2: H-ICVAL, H-PEARSON, H-YFIN, H-WIKI, H-SURV, H-SIGNAL, H-SORTINO, H-WINSGLOB, H-MULTIIDX, H-MACRO, H-TICKER, H-HRP (commit d295a8d)
+- [x] Phase 3: M-BOOTSTRAP, M-EARLYSTOP, M-SHARPE3, M-REGIME-SHARPE, M-ATR, M-MACROPATH, M-LOGMSG, M-VIX, M-HYSTERESIS, M-TURNOVER (commit 8d4023b)
 
 ---
 
@@ -180,7 +180,9 @@ Both branch from `main` at commit `152b865`.
 ## Breaking Changes to Watch
 
 If OpenCode changes the signature or behavior of any function called by `live_bot.py` or `execution.py`, note it here:
-- (none yet)
+- `get_current_atr()` now accepts optional `default` parameter (backward-compatible, defaults to None)
+- `RegimeDetector.get_regime()` halt→caution de-escalation changed from AND to OR logic (M-HYSTERESIS)
+- `compute_metrics()` in robustness.py now uses geometric Sharpe with rf=5% (values will differ from old arithmetic formula)
 
 If Claude Code changes `RiskManager` API, note here:
 - (none yet)

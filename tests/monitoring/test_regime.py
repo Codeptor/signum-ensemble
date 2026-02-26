@@ -187,14 +187,27 @@ class TestHysteresis:
         assert d.get_regime(vix=27.5, spy_drawdown=0.0) == "normal"
 
     def test_halt_deescalation_requires_band_crossing(self):
-        """De-escalation from halt→caution requires VIX < halt - hysteresis."""
+        """De-escalation from halt: OR logic allows partial de-escalation.
+
+        M-HYSTERESIS fix: changed from AND (both VIX AND drawdown must clear)
+        to OR (either VIX OR drawdown clearing allows de-escalation to caution).
+        This prevents the strategy from being locked in halt for months during
+        prolonged drawdowns when VIX has already normalized.
+        """
         d = RegimeDetector()  # vix_halt=40, vix_hysteresis=2
-        # Escalate to halt
+        # Escalate to halt via VIX only (drawdown is 0)
         d.get_regime(vix=41.0, spy_drawdown=0.0)
-        # VIX drops to 39 — still within halt hysteresis band (40-2=38)
-        assert d.get_regime(vix=39.0, spy_drawdown=0.0) == "halt"
-        # VIX drops below 38 — clears halt band, but still above caution (30)
-        assert d.get_regime(vix=35.0, spy_drawdown=0.0) == "caution"
+        # VIX drops to 39 — within halt hysteresis band, but drawdown (0.0)
+        # clears dd_clear (0.0 <= 0.13), so OR passes → de-escalate to caution
+        assert d.get_regime(vix=39.0, spy_drawdown=0.0) == "caution"
+
+        # Now test the case where BOTH signals are bad and neither clears
+        d2 = RegimeDetector()
+        d2.get_regime(vix=41.0, spy_drawdown=0.16)
+        # Both VIX (39 > 38) and drawdown (0.14 > 0.13) are within bands
+        assert d2.get_regime(vix=39.0, spy_drawdown=0.14) == "halt"
+        # VIX clears band (37 <= 38), drawdown still bad → OR passes → caution
+        assert d2.get_regime(vix=37.0, spy_drawdown=0.14) == "caution"
 
     def test_drawdown_hysteresis(self):
         """Drawdown de-escalation also uses hysteresis band."""

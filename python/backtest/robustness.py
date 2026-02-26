@@ -25,8 +25,45 @@ HISTORICAL_SCENARIOS = {
 }
 
 
-def compute_metrics(returns: pd.Series, periods_per_year: float = 252 / 5) -> dict:
-    """Compute basic performance metrics for a return series."""
+def compute_sharpe(
+    returns: pd.Series | np.ndarray,
+    periods_per_year: float = 252 / 5,
+    risk_free_rate: float = 0.05,
+) -> float:
+    """Centralized Sharpe ratio calculation (geometric annualization, rf-adjusted).
+
+    M-SHARPE3 fix: all modules should use this single implementation to avoid
+    the three divergent formulas previously scattered across run.py,
+    robustness.py, and regime_analysis.py.
+
+    Args:
+        returns: Period returns (e.g. 5-day rebalance returns).
+        periods_per_year: Number of return periods per year (default 252/5 for 5-day).
+        risk_free_rate: Annual risk-free rate (default 5%).
+
+    Returns:
+        Annualized Sharpe ratio (geometric return minus rf, divided by annualized vol).
+    """
+    if isinstance(returns, np.ndarray):
+        returns = pd.Series(returns)
+    if len(returns) == 0 or returns.std() == 0:
+        return 0.0
+    ann_return = (1 + returns.mean()) ** periods_per_year - 1
+    ann_vol = returns.std() * np.sqrt(periods_per_year)
+    return float((ann_return - risk_free_rate) / ann_vol) if ann_vol > 0 else 0.0
+
+
+def compute_metrics(
+    returns: pd.Series,
+    periods_per_year: float = 252 / 5,
+    risk_free_rate: float = 0.05,
+) -> dict:
+    """Compute basic performance metrics for a return series.
+
+    M-SHARPE3 fix: delegates Sharpe calculation to ``compute_sharpe()`` which
+    uses geometric annualization and subtracts the risk-free rate, consistent
+    with run.py and risk.py.
+    """
     if len(returns) == 0:
         return {
             "ann_return": 0.0,
@@ -35,17 +72,17 @@ def compute_metrics(returns: pd.Series, periods_per_year: float = 252 / 5) -> di
             "max_drawdown": 0.0,
         }
 
-    ann_return = returns.mean() * periods_per_year
-    ann_vol = returns.std() * np.sqrt(periods_per_year)
-    sharpe = ann_return / ann_vol if ann_vol > 0 else 0.0
+    ann_return = float((1 + returns.mean()) ** periods_per_year - 1)
+    ann_vol = float(returns.std() * np.sqrt(periods_per_year))
+    sharpe = compute_sharpe(returns, periods_per_year, risk_free_rate)
 
     cumulative = (1 + returns).cumprod()
     max_dd = ((cumulative.cummax() - cumulative) / cumulative.cummax()).max()
 
     return {
-        "ann_return": float(ann_return),
-        "ann_volatility": float(ann_vol),
-        "sharpe_ratio": float(sharpe),
+        "ann_return": ann_return,
+        "ann_volatility": ann_vol,
+        "sharpe_ratio": sharpe,
         "max_drawdown": float(max_dd),
     }
 
@@ -338,10 +375,27 @@ def monte_carlo_resampling(
     returns_arr = returns.values
     rng = np.random.default_rng(42)
 
+    # M-BOOTSTRAP fix: use stationary block bootstrap to preserve
+    # autocorrelation in the return series.  Average block length is set
+    # to the cube root of n_obs (standard rule-of-thumb for stationary
+    # bootstrap), with geometric random block lengths.
+    avg_block_len = max(int(round(n_obs ** (1 / 3))), 2)
+
     for _ in range(n_simulations):
-        # Sample with replacement
-        idx = rng.integers(0, n_obs, n_obs)
-        sim_rets = returns_arr[idx]
+        # Stationary block bootstrap: randomly sample blocks of geometric
+        # random length, wrapping around the end of the series.
+        sim_rets = np.empty(n_obs)
+        i = 0
+        while i < n_obs:
+            start = rng.integers(0, n_obs)
+            # Geometric random block length (mean = avg_block_len)
+            block_len = rng.geometric(1.0 / avg_block_len)
+            block_len = min(block_len, n_obs - i)  # don't exceed remaining
+            for j in range(block_len):
+                sim_rets[i] = returns_arr[(start + j) % n_obs]
+                i += 1
+                if i >= n_obs:
+                    break
 
         sim_series = pd.Series(sim_rets)
         metrics = compute_metrics(sim_series, periods_per_year)

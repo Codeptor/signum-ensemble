@@ -28,6 +28,10 @@ RESULTS_DIR = Path("data/processed")
 # Minimum trailing days needed for covariance estimation
 MIN_PRICE_HISTORY = 60
 
+# C-SHARPE fix: risk-free rate for Sharpe ratio calculation.
+# Approximate 1-year US Treasury bill rate as of 2025.
+RISK_FREE_RATE = 0.05
+
 
 def _allocate(
     top_tickers: list[str],
@@ -374,12 +378,16 @@ def run_backtest(
     portfolio_returns = returns_df["return"]
     gross_returns = returns_df["return_gross"]
 
-    ann_return = portfolio_returns.mean() * (252 / rebalance_days)
-    ann_vol = portfolio_returns.std() * np.sqrt(252 / rebalance_days)
-    sharpe = ann_return / ann_vol if ann_vol > 0 else 0
+    # C-SHARPE fix: use geometric annualization and subtract risk-free rate.
+    # Old formula used arithmetic mean × (252/rebal_days) without rf,
+    # inconsistent with risk.py and standard practice.
+    periods_per_year = 252 / rebalance_days
+    ann_return = (1 + portfolio_returns.mean()) ** periods_per_year - 1
+    ann_vol = portfolio_returns.std() * np.sqrt(periods_per_year)
+    sharpe = (ann_return - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else 0
 
-    ann_return_gross = gross_returns.mean() * (252 / rebalance_days)
-    sharpe_gross = ann_return_gross / ann_vol if ann_vol > 0 else 0
+    ann_return_gross = (1 + gross_returns.mean()) ** periods_per_year - 1
+    sharpe_gross = (ann_return_gross - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else 0
 
     avg_turnover = total_turnover / max(n_rebalances, 1)
     cumulative = (1 + portfolio_returns).cumprod()

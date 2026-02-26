@@ -1,11 +1,17 @@
 """Technical feature computation inspired by Qlib Alpha158."""
 
+import json
 import logging
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Default directory for persisted winsorization bounds
+_BOUNDS_DIR = Path("data/models")
 
 # Columns that should be winsorized to limit outlier impact (Fix #20)
 _WINSORIZE_COLS = [
@@ -53,6 +59,7 @@ def winsorize(
     cols: list[str] | None = None,
     lower: float = 0.005,
     upper: float = 0.995,
+    bounds: Optional[dict[str, tuple[float, float]]] = None,
 ) -> pd.DataFrame:
     """Clip feature columns at the given percentiles to limit outlier impact.
 
@@ -60,19 +67,110 @@ def winsorize(
     H6 fix: default percentiles widened from 1st/99th to 0.5th/99.5th to
     better accommodate fat-tailed return distributions.
 
+    C-WINS fix: if ``bounds`` is provided, those fixed (lo, hi) pairs are
+    applied instead of recomputing from the current data.  This ensures
+    training and inference use identical clipping thresholds.
+
     Args:
         df: Input DataFrame.
         cols: Columns to winsorize. If None, uses default feature list.
         lower: Lower percentile (e.g. 0.005 for 0.5th percentile).
         upper: Upper percentile (e.g. 0.995 for 99.5th percentile).
+        bounds: Optional pre-computed {col: (lo, hi)} dict.  When provided,
+            ``lower``/``upper`` percentile args are ignored and these fixed
+            values are used instead.
     """
     df = df.copy()  # M15 fix: never mutate caller's DataFrame
     cols = cols or [c for c in _WINSORIZE_COLS if c in df.columns]
     for col in cols:
-        lo = df[col].quantile(lower)
-        hi = df[col].quantile(upper)
+        if bounds is not None and col in bounds:
+            lo, hi = bounds[col]
+        else:
+            lo = df[col].quantile(lower)
+            hi = df[col].quantile(upper)
         df[col] = df[col].clip(lo, hi)
     return df
+
+
+def compute_winsorize_bounds(
+    df: pd.DataFrame,
+    cols: list[str] | None = None,
+    lower: float = 0.005,
+    upper: float = 0.995,
+) -> dict[str, tuple[float, float]]:
+    """Compute per-column winsorization bounds from training data.
+
+    C-WINS fix: these bounds should be persisted at training time and
+    loaded at inference time so the model sees identical feature
+    distributions in both regimes.
+
+    Args:
+        df: Training DataFrame.
+        cols: Columns to compute bounds for.  Defaults to ``_WINSORIZE_COLS``.
+        lower: Lower percentile.
+        upper: Upper percentile.
+
+    Returns:
+        Dict mapping column name to (lo, hi) tuple.
+    """
+    cols = cols or [c for c in _WINSORIZE_COLS if c in df.columns]
+    bounds: dict[str, tuple[float, float]] = {}
+    for col in cols:
+        lo = float(df[col].quantile(lower))
+        hi = float(df[col].quantile(upper))
+        bounds[col] = (lo, hi)
+    return bounds
+
+
+def save_winsorize_bounds(
+    bounds: dict[str, tuple[float, float]],
+    path: str | Path | None = None,
+) -> Path:
+    """Persist winsorization bounds to a JSON file.
+
+    Args:
+        bounds: Dict of {col: (lo, hi)}.
+        path: Output path.  Defaults to ``data/models/winsorize_bounds.json``.
+
+    Returns:
+        The path the file was written to.
+    """
+    if path is None:
+        path = _BOUNDS_DIR / "winsorize_bounds.json"
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # JSON can't serialize tuples — convert to lists
+    serializable = {col: list(vals) for col, vals in bounds.items()}
+    path.write_text(json.dumps(serializable, indent=2))
+    logger.info(f"Saved winsorize bounds ({len(bounds)} cols) to {path}")
+    return path
+
+
+def load_winsorize_bounds(
+    path: str | Path | None = None,
+) -> dict[str, tuple[float, float]] | None:
+    """Load persisted winsorization bounds.
+
+    Args:
+        path: Path to the JSON file.  Defaults to
+            ``data/models/winsorize_bounds.json``.
+
+    Returns:
+        Dict of {col: (lo, hi)}, or None if the file doesn't exist.
+    """
+    if path is None:
+        path = _BOUNDS_DIR / "winsorize_bounds.json"
+    path = Path(path)
+
+    if not path.exists():
+        logger.warning(f"No winsorize bounds file at {path} — will compute from data")
+        return None
+
+    raw = json.loads(path.read_text())
+    bounds = {col: (vals[0], vals[1]) for col, vals in raw.items()}
+    logger.info(f"Loaded winsorize bounds ({len(bounds)} cols) from {path}")
+    return bounds
 
 
 def _scrub_infinities(df: pd.DataFrame) -> pd.DataFrame:
@@ -92,7 +190,10 @@ def _scrub_infinities(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def compute_alpha_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_alpha_features(
+    df: pd.DataFrame,
+    winsorize_bounds: Optional[dict[str, tuple[float, float]]] = None,
+) -> pd.DataFrame:
     """Compute technical features per ticker.
 
     Input: DataFrame with columns [ticker, open, high, low, close, volume] and DatetimeIndex.
@@ -100,6 +201,16 @@ def compute_alpha_features(df: pd.DataFrame) -> pd.DataFrame:
 
     H7 fix: winsorize is applied uniformly *after* all per-ticker features
     are computed, ensuring consistent clipping regardless of computation order.
+
+    C-WINS fix: accepts optional pre-computed winsorize bounds so that
+    inference uses the same clipping thresholds as training.
+
+    Args:
+        df: Long-format OHLCV DataFrame with a ``ticker`` column.
+        winsorize_bounds: Optional dict of {col: (lo, hi)} from training.
+            If None, bounds are computed from the current data (training
+            behaviour).  Pass the output of ``load_winsorize_bounds()``
+            at inference time for consistency.
     """
     results = []
     for ticker, group in df.groupby("ticker"):
@@ -109,7 +220,8 @@ def compute_alpha_features(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat(results).sort_index()
 
     # H7 fix: winsorize all feature columns after computation, not piecemeal
-    out = winsorize(out)
+    # C-WINS fix: use pre-computed bounds when available
+    out = winsorize(out, bounds=winsorize_bounds)
 
     return out
 
@@ -190,6 +302,12 @@ def compute_forward_returns(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
 
     IMPORTANT: This uses future data and must only be used for label creation,
     never as a feature.
+
+    C-TARGET fix: target winsorization has been removed.  Previously the
+    target was clipped *before* ``compute_residual_target()`` subtracted
+    the cross-sectional mean, biasing the residual toward zero for extreme
+    movers.  LightGBM's Huber loss already down-weights outlier targets,
+    making explicit winsorization unnecessary and actively harmful.
     """
     results = []
     for ticker, group in df.groupby("ticker"):
@@ -198,10 +316,8 @@ def compute_forward_returns(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
         results.append(g)
     out = pd.concat(results).sort_index()
 
-    # Winsorize targets at 1st/99th percentile to limit outlier impact
-    target_col = f"target_{horizon}d"
-    if target_col in out.columns:
-        out = winsorize(out, cols=[target_col])
+    # C-TARGET fix: do NOT winsorize targets — Huber loss handles outliers,
+    # and clipping before residualization biases the residual.
     return out
 
 
@@ -239,21 +355,28 @@ def compute_cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def merge_macro_features(
     df: pd.DataFrame,
-    macro_path: str = "data/raw/macro_indicators.parquet",
+    macro_path: str | Path = "data/raw/macro_indicators.parquet",
 ) -> pd.DataFrame:
     """Merge macro regime features (VIX, yields) into the feature DataFrame.
 
     Loads macro data, computes derived signals, and broadcasts to all tickers
     via date alignment with forward-fill.
+
+    M-MACROPATH fix: when ``macro_path`` is relative, it is resolved relative
+    to the project root (2 levels up from this file: ``python/alpha/``) so
+    that the function works regardless of the caller's working directory.
     """
     import logging
 
     logger = logging.getLogger(__name__)
 
-    # Check if macro file exists
-    import os
+    # M-MACROPATH fix: resolve relative paths against project root
+    macro_path = Path(macro_path)
+    if not macro_path.is_absolute():
+        project_root = Path(__file__).resolve().parent.parent.parent
+        macro_path = project_root / macro_path
 
-    if not os.path.exists(macro_path):
+    if not macro_path.exists():
         logger.warning(f"Macro indicators file not found: {macro_path}. Skipping macro features.")
         return df
 
@@ -275,6 +398,22 @@ def merge_macro_features(
 
     # Forward-fill and join on date (level-0 of df's index)
     macro = macro.reindex(df.index.get_level_values(0).unique()).ffill()
+
+    # H-MACRO fix: for dates before the first macro observation (e.g. early
+    # training rows), ffill produces NaN which then drops rows from the
+    # training set.  Back-fill first, then fill any remaining NaN with
+    # domain-appropriate neutral defaults.
+    macro = macro.bfill()
+    _macro_neutral = {
+        "vix": 20.0,
+        "vix_ma_ratio": 1.0,
+        "term_spread": 1.0,
+        "term_spread_change_20d": 0.0,
+    }
+    for col in macro_cols:
+        if col in _macro_neutral:
+            macro[col] = macro[col].fillna(_macro_neutral[col])
+
     for col in macro_cols:
         df[col] = df.index.get_level_values(0).map(macro[col])
 
@@ -327,18 +466,25 @@ def get_current_atr(
     symbol: str,
     window: int = 14,
     period: str = "3mo",
+    default: float | None = None,
 ) -> float | None:
     """Fetch current ATR for a single symbol from Yahoo Finance.
 
     Convenience function for the live bot to get ATR for stop-loss placement.
 
+    M-ATR fix: added ``default`` parameter and NaN guard.  When the ATR
+    computation fails or returns NaN, the function returns ``default``
+    instead of ``None``.  Callers can pass a neutral default (e.g. a
+    fraction of current price) to avoid downstream ``None`` type errors.
+
     Args:
         symbol: Ticker symbol.
         window: ATR lookback period.
         period: Yahoo Finance period string for data fetch.
+        default: Value to return if ATR cannot be computed.
 
     Returns:
-        Current ATR value, or None if data unavailable.
+        Current ATR value, or ``default`` if data unavailable or NaN.
     """
     import logging
 
@@ -350,7 +496,7 @@ def get_current_atr(
         data = yf.download(symbol, period=period, interval="1d", progress=False)
         if data is None or len(data) < window + 1:
             logger.warning(f"Insufficient data for ATR computation: {symbol}")
-            return None
+            return default
 
         # Compute ATR
         high = data["High"]
@@ -365,11 +511,15 @@ def get_current_atr(
         atr = true_range.rolling(window).mean()
 
         current_atr = float(atr.iloc[-1])
+        # M-ATR fix: guard against NaN result (e.g. all-NaN rolling window)
+        if pd.isna(current_atr):
+            logger.warning(f"ATR({window}) for {symbol} is NaN — returning default")
+            return default
         logger.debug(f"ATR({window}) for {symbol}: {current_atr:.2f}")
         return current_atr
     except Exception as e:
         logger.warning(f"Failed to compute ATR for {symbol}: {e}")
-        return None
+        return default
 
 
 def compute_residual_target(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
