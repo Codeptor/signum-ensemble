@@ -190,14 +190,14 @@ class StressTester:
         Returns:
             Dictionary with MC stress test results
         """
-        np.random.seed(random_seed)
+        rng = np.random.default_rng(random_seed)
 
         # Adjust parameters for stress
         mean = self.portfolio_returns.mean() + mean_adjustment
         vol = self.portfolio_returns.std() * vol_multiplier
 
         # Run simulations
-        simulations = np.random.normal(mean, vol, (n_simulations, horizon_days))
+        simulations = rng.normal(mean, vol, (n_simulations, horizon_days))
         total_returns = (1 + simulations).prod(axis=1) - 1
 
         return {
@@ -336,11 +336,11 @@ def monte_carlo_resampling(
     simulated_dds = []
 
     returns_arr = returns.values
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
 
     for _ in range(n_simulations):
         # Sample with replacement
-        idx = np.random.randint(0, n_obs, n_obs)
+        idx = rng.integers(0, n_obs, n_obs)
         sim_rets = returns_arr[idx]
 
         sim_series = pd.Series(sim_rets)
