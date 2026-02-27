@@ -214,9 +214,11 @@ def _cmd_positions() -> str:
         pct = float(p.get("unrealized_plpc", 0)) * 100
         weight = float(p.get("weight", 0)) * 100
         sign = "+" if pl >= 0 else ""
-        lines.append(
-            f"  {sym}: {qty} shares, ${mv:,.0f} ({weight:.1f}%), {sign}${pl:,.0f} ({sign}{pct:.1f}%)"
+        line = (
+            f"  {sym}: {qty} shares, ${mv:,.0f} ({weight:.1f}%), "
+            f"{sign}${pl:,.0f} ({sign}{pct:.1f}%)"
         )
+        lines.append(line)
 
     lines.append(f"\nTotal: ${float(total_value):,.0f}")
     sign = "+" if total_pl >= 0 else ""
@@ -425,7 +427,8 @@ def start_telegram_command_handler() -> threading.Thread | None:
     """
     if not _is_configured():
         logger.info(
-            "Telegram command handler not configured (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)"
+            "Telegram command handler not configured"
+            " (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)"
         )
         return None
 

@@ -9,8 +9,7 @@ Covers:
   - Dashboard API integration (mocked)
 """
 
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch  # noqa: I001
 
 import pytest
 
