@@ -76,8 +76,10 @@ class TFTAlphaModel:
         # Create sequential integer time index per ticker (avoids gaps from weekends)
         data["time_idx"] = data.groupby("ticker").cumcount()
 
-        # Fill NaN in features
-        for col in self.feature_cols + [self.target_col]:
+        # Drop rows with NaN targets (filling with 0.0 fabricates zero-return labels)
+        data = data.dropna(subset=[self.target_col])
+        # Fill NaN in features only (tree models handle NaN, but TFT needs clean inputs)
+        for col in self.feature_cols:
             data[col] = data[col].fillna(0.0)
 
         # pytorch-forecasting requires a unique index
