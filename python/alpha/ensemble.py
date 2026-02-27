@@ -212,8 +212,9 @@ class ModelEnsemble:
         self._fitted = True
 
         # 4. Stacking meta-learner (on OOS predictions only)
+        #    Evaluate IC on ic_cal_df (held-out) to avoid in-sample evaluation.
         if self.use_stacking and oos_df is not None and len(oos_df) > 10:
-            self._fit_meta_learner(oos_df, target_col)
+            self._fit_meta_learner(oos_df, target_col, ic_eval_df=ic_cal_df)
 
         # 5. IC-based weight calibration (fallback or for diagnostics)
         if ic_cal_df is not None and len(ic_cal_df) > 10:
@@ -221,8 +222,20 @@ class ModelEnsemble:
 
         logger.info("  Ensemble training complete")
 
-    def _fit_meta_learner(self, oos_df: pd.DataFrame, target_col: str) -> None:
-        """Train Ridge meta-learner on out-of-sample base model predictions."""
+    def _fit_meta_learner(
+        self,
+        oos_df: pd.DataFrame,
+        target_col: str,
+        ic_eval_df: pd.DataFrame | None = None,
+    ) -> None:
+        """Train Ridge meta-learner on out-of-sample base model predictions.
+
+        Args:
+            oos_df: Out-of-sample data for training the meta-learner.
+            target_col: Target column name.
+            ic_eval_df: Separate held-out data for evaluating stacking IC.
+                If None, IC is not computed (avoids in-sample evaluation).
+        """
         X_oos, y_oos, mask = self._clean_arrays(oos_df, target_col)
         if mask.sum() < 10:
             logger.warning("Not enough OOS samples for meta-learner training")
@@ -242,12 +255,26 @@ class ModelEnsemble:
         self.meta_learner = Ridge(alpha=1.0)
         self.meta_learner.fit(base_preds, y_clean)
 
-        meta_pred = self.meta_learner.predict(base_preds)
-        stacking_ic = _safe_ic(meta_pred, y_clean)
+        # Evaluate stacking IC on held-out ic_eval_df (NOT training data)
+        stacking_ic = 0.0
+        if ic_eval_df is not None and len(ic_eval_df) > 10:
+            X_eval, y_eval, eval_mask = self._clean_arrays(ic_eval_df, target_col)
+            if eval_mask.sum() >= 10:
+                eval_clean = ic_eval_df.iloc[eval_mask.nonzero()[0]]
+                y_eval_clean = y_eval[eval_mask]
+                X_eval_clean = X_eval[eval_mask]
+                eval_base_preds = np.column_stack([
+                    self.lgbm.predict(eval_clean),
+                    self.catboost.predict(X_eval_clean),
+                    self.rf.predict(X_eval_clean),
+                ])
+                eval_meta_pred = self.meta_learner.predict(eval_base_preds)
+                stacking_ic = _safe_ic(eval_meta_pred, y_eval_clean)
+
         self.validation_ic = stacking_ic
         logger.info(
             f"  Meta-learner trained on {len(y_clean)} OOS samples. "
-            f"Stacking IC={stacking_ic:.4f}, "
+            f"Stacking IC (held-out)={stacking_ic:.4f}, "
             f"Ridge coefs={dict(zip(['lgbm', 'catboost', 'rf'], self.meta_learner.coef_.round(3)))}"
         )
 
@@ -332,8 +359,11 @@ class ModelEnsemble:
         else:
             logger.warning("All models have non-positive IC — keeping default weights")
 
-        # Set validation_ic to the best individual model IC
-        self.validation_ic = max(ics.values()) if ics else 0.0
+        # Only set validation_ic if meta-learner hasn't already set it.
+        # Stacking IC (from _fit_meta_learner) is a more accurate measure
+        # of ensemble quality than the best individual base model IC.
+        if self.meta_learner is None:
+            self.validation_ic = max(ics.values()) if ics else 0.0
         logger.info(f"  Calibrated ensemble weights: {self.weights}")
         return self.weights
 
