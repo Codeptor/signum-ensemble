@@ -178,7 +178,7 @@ def _send_email_resend(subject: str, body_text: str, body_html: str | None = Non
         resp = urllib.request.urlopen(req, timeout=15)
         logger.debug(f"Resend email sent to {recipients}: {subject} (HTTP {resp.status})")
     except Exception:
-        logger.debug("Failed to send Resend email", exc_info=True)
+        logger.warning("Failed to send Resend email", exc_info=True)
 
 
 def _send_email_sendgrid(subject: str, body_text: str, body_html: str | None = None) -> None:
@@ -495,10 +495,11 @@ def send_heartbeat(
     Use for periodic "all is well" signals so silence = problem.
     """
     global _last_heartbeat_ts
-    now = time.monotonic()
-    if not force and (now - _last_heartbeat_ts) < _HEARTBEAT_COOLDOWN_SECS:
-        return
-    _last_heartbeat_ts = now
+    with _alert_lock:
+        now = time.monotonic()
+        if not force and (now - _last_heartbeat_ts) < _HEARTBEAT_COOLDOWN_SECS:
+            return
+        _last_heartbeat_ts = now
     send_alert(message, severity=AlertSeverity.INFO)
 
 
