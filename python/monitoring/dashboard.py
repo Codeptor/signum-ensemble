@@ -46,6 +46,20 @@ BOT_LOG_FILE = Path(os.getenv("LOG_DIR", "/var/log/signum")) / "bot.log"
 # Fallback: check for local log file when not on VPS
 _LOCAL_LOG = Path("live_bot.log")
 
+# Cached AlpacaBroker — avoid creating a new connection on every 60s refresh
+_cached_broker = None
+
+
+def _get_broker():
+    """Return a cached AlpacaBroker instance, creating one if needed."""
+    global _cached_broker
+    if _cached_broker is None:
+        from python.brokers.alpaca_broker import AlpacaBroker
+
+        _cached_broker = AlpacaBroker(paper_trading=True)
+        _cached_broker.connect()
+    return _cached_broker
+
 # ═══════════════════════════════════════════════════════════════════
 # Design Tokens
 # ═══════════════════════════════════════════════════════════════════
@@ -858,10 +872,7 @@ def _build_live_tab() -> html.Div:
     broker_error = None
 
     try:
-        from python.brokers.alpaca_broker import AlpacaBroker
-
-        broker = AlpacaBroker(paper_trading=True)
-        broker.connect()
+        broker = _get_broker()
         account = broker.get_account()
         positions = broker.list_positions()
         open_orders = broker.list_orders(status="open")
@@ -1766,10 +1777,7 @@ def _fetch_account_json() -> dict | None:
     if not os.getenv("ALPACA_API_KEY") or not os.getenv("ALPACA_API_SECRET"):
         return None
     try:
-        from python.brokers.alpaca_broker import AlpacaBroker
-
-        broker = AlpacaBroker(paper_trading=True)
-        broker.connect()
+        broker = _get_broker()
         acct = broker.get_account()
         return {
             "timestamp": datetime.now().isoformat(),
@@ -1790,10 +1798,7 @@ def _fetch_positions_json() -> dict | None:
     if not os.getenv("ALPACA_API_KEY") or not os.getenv("ALPACA_API_SECRET"):
         return None
     try:
-        from python.brokers.alpaca_broker import AlpacaBroker
-
-        broker = AlpacaBroker(paper_trading=True)
-        broker.connect()
+        broker = _get_broker()
         positions = broker.list_positions()
         acct = broker.get_account()
         equity = _safe_float(acct.equity) if acct else 0.0
