@@ -23,9 +23,6 @@ from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponenti
 from python.data.config import (
     DEFAULT_INTERVAL,
     DEFAULT_PERIOD,
-    MAX_OHLCV_AGE_DAYS,
-    OHLCV_CACHE_META_PATH,
-    OHLCV_CACHE_PATH,
     RAW_DIR,
     TICKER_CACHE_PATH,
     TICKER_CACHE_TTL_HOURS,

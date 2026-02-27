@@ -10,8 +10,7 @@ Validates that the system degrades gracefully when yfinance is unavailable:
 
 import json
 import time
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -383,8 +382,6 @@ class TestGetMlWeightsCircuitBreaker:
 
         cached_ohlcv = pd.DataFrame({"A": [1, 2, 3]})
         mock_load_ohlcv.return_value = (cached_ohlcv, False)
-
-        import numpy as np
 
         dates = pd.bdate_range("2024-01-01", periods=100)
         rows = [{"ticker": "AAPL", "close": 100.0} for _ in dates]
