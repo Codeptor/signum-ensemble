@@ -1882,6 +1882,20 @@ wheels = [
 ]
 
 [[package]]
+name = "mapie"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/11/c9/d2e3a370b3d284cf80fe3534712005994667522df69f6890aa40caf64784/mapie-1.3.0.tar.gz", hash = "sha256:94c760dd667b4ab88eb4964ff5b0177ba74e082f4220796e3c581e53195107e2", size = 179359, upload-time = "2026-02-03T14:57:48.823Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/86/e23e00473d7625027198519eb8d1b4d8ae37ebe4fd0264546070e6214a23/mapie-1.3.0-py3-none-any.whl", hash = "sha256:1c934eb0367c099c3b71c63afff32cb5125e4e61d4867177ea925f9b19386f99", size = 216374, upload-time = "2026-02-03T14:57:47.058Z" },
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3211,6 +3225,7 @@ dependencies = [
     { name = "hmmlearn" },
     { name = "lightgbm" },
     { name = "lxml" },
+    { name = "mapie" },
     { name = "mlflow" },
     { name = "numpy" },
     { name = "pandas" },
@@ -3278,6 +3293,7 @@ requires-dist = [
     { name = "lightgbm", specifier = ">=4.0" },
     { name = "lightning", marker = "extra == 'ml'", specifier = ">=2.1" },
     { name = "lxml", specifier = ">=4.9" },
+    { name = "mapie", specifier = ">=1.3.0" },
     { name = "mlflow", specifier = ">=2.10" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pandas", specifier = ">=2.0" },
