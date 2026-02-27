@@ -445,7 +445,7 @@ def compute_features(long_df: pd.DataFrame) -> pd.DataFrame:
 
     # Merge macro features at inference time (same as train_model does)
     # This prevents KeyError when the model expects 'vix' but it's missing.
-    macro_path = Path("data/raw/macro_indicators.parquet")
+    macro_path = _PROJECT_ROOT / "data" / "raw" / "macro_indicators.parquet"
     if macro_path.exists():
         from python.alpha.features import merge_macro_features
 
@@ -531,7 +531,7 @@ def train_model(
     featured = compute_cross_sectional_features(featured)
 
     # Try to merge macro features if available
-    macro_path = Path("data/raw/macro_indicators.parquet")
+    macro_path = _PROJECT_ROOT / "data" / "raw" / "macro_indicators.parquet"
     if macro_path.exists():
         from python.alpha.features import merge_macro_features
 
