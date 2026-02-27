@@ -222,11 +222,14 @@ class BaseBroker(ABC):
                 continue
 
             price = self.get_latest_price(symbol)
+            if price <= 0:
+                logger.warning(f"Skipping {symbol}: zero or negative price ({price})")
+                continue
             target_qty = (target_weight * portfolio_value) / price
             current_qty = current_positions.get(symbol, 0)
             diff = target_qty - current_qty
 
-            if abs(diff) > 1e-6:  # Minimum order size
+            if abs(diff) >= 1.0:  # Minimum 1 share to avoid sub-dollar rejects
                 side = "buy" if diff > 0 else "sell"
                 qty = abs(diff)
 
