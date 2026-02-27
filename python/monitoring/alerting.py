@@ -219,7 +219,7 @@ def _send_email_sendgrid(subject: str, body_text: str, body_html: str | None = N
         resp = urllib.request.urlopen(req, timeout=15)
         logger.debug(f"SendGrid email sent to {recipients}: {subject} (HTTP {resp.status})")
     except Exception:
-        logger.debug("Failed to send SendGrid email", exc_info=True)
+        logger.warning("Failed to send SendGrid email", exc_info=True)
 
 
 def _send_email_smtp(subject: str, body_text: str, body_html: str | None = None) -> None:
@@ -256,7 +256,7 @@ def _send_email_smtp(subject: str, body_text: str, body_html: str | None = None)
         server.quit()
         logger.debug(f"SMTP email sent to {recipients}: {subject}")
     except Exception:
-        logger.debug("Failed to send SMTP email", exc_info=True)
+        logger.warning("Failed to send SMTP email", exc_info=True)
 
 
 def _send_email(subject: str, body_text: str, body_html: str | None = None) -> None:
