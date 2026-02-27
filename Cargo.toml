@@ -1,3 +1,3 @@
 [workspace]
-members = ["rust/matching-engine"]
+members = ["rust/matching-engine", "rust/matching-engine-py"]
 resolver = "2"

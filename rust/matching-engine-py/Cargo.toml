@@ -1,0 +1,12 @@
+[package]
+name = "matching-engine-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "matching_engine_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+matching-engine = { path = "../matching-engine" }
+pyo3 = { version = "0.23", features = ["extension-module"] }
