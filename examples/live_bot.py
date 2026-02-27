@@ -29,6 +29,7 @@ from python.alpha.predict import get_ml_weights
 from python.bridge.execution import ExecutionBridge
 from python.brokers.alpaca_broker import AlpacaBroker
 from python.brokers.base import BrokerOrder
+from python.data.config import RISK_ENGINE_CACHE_PATH, STALE_DATA_EXPOSURE_MULT
 from python.data.sectors import DEFAULT_MAX_SECTOR_WEIGHT, SECTOR_MAP
 from python.monitoring.regime import RegimeDetector, RegimeState, fetch_spy_drawdown, fetch_vix
 from python.portfolio.risk_manager import RiskLimits, RiskManager
@@ -507,6 +508,9 @@ def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> 
 
     Without this, all risk checks (VaR, drawdown, volatility) are no-ops
     because risk_engine remains None.
+
+    Circuit breaker: on yfinance failure, falls back to a disk-cached
+    returns DataFrame from a previous successful initialization.
     """
     positions = broker.list_positions()
     if not positions:
@@ -523,6 +527,7 @@ def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> 
     weights = pd.Series({p.symbol: p.market_value / total_value for p in positions})
 
     # Fetch 1-year of daily bars for portfolio risk calc
+    returns_df = None
     try:
         import yfinance as yf
 
@@ -535,23 +540,51 @@ def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> 
                 else pd.DataFrame(close_raw)
             )
             returns = close.pct_change().dropna()
-            # Align weights to available columns
             available = [s for s in symbols if s in returns.columns]
             if available:
                 returns_df = pd.DataFrame(returns[available])
-                risk_manager.initialize_portfolio_risk(
-                    returns=returns_df,
-                    weights=weights.reindex(available).fillna(0),
-                )
-                logger.info(
-                    f"Risk engine initialized with {len(available)} positions, "
-                    f"{len(returns)} days of history."
-                )
-                return
+                # Persist for offline fallback
+                try:
+                    RISK_ENGINE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = RISK_ENGINE_CACHE_PATH.with_suffix(".tmp")
+                    returns_df.to_parquet(tmp)
+                    tmp.replace(RISK_ENGINE_CACHE_PATH)
+                    logger.info("Persisted risk engine returns cache")
+                except Exception as e2:
+                    logger.warning(f"Could not persist risk engine cache: {e2}")
     except Exception as e:
-        logger.warning(f"Failed to initialize risk engine: {e}")
+        logger.warning(f"Failed to fetch risk engine data: {e} — trying disk cache")
 
-    logger.warning("Risk engine could not be initialized — risk checks will be no-ops.")
+    # Circuit breaker: fall back to disk cache
+    if returns_df is None and RISK_ENGINE_CACHE_PATH.exists():
+        try:
+            returns_df = pd.read_parquet(RISK_ENGINE_CACHE_PATH)
+            # Restrict to current symbols
+            available = [s for s in symbols if s in returns_df.columns]
+            if available:
+                returns_df = returns_df[available]
+                logger.info(
+                    f"Loaded risk engine cache ({len(returns_df)} days, {len(available)} symbols)"
+                )
+            else:
+                logger.warning("Risk engine cache has no matching symbols")
+                returns_df = None
+        except Exception as e:
+            logger.warning(f"Risk engine disk cache failed: {e}")
+            returns_df = None
+
+    if returns_df is not None and len(returns_df) > 0:
+        available = [s for s in symbols if s in returns_df.columns]
+        risk_manager.initialize_portfolio_risk(
+            returns=returns_df,
+            weights=weights.reindex(available).fillna(0),
+        )
+        logger.info(
+            f"Risk engine initialized with {len(available)} positions, "
+            f"{len(returns_df)} days of history."
+        )
+    else:
+        logger.warning("Risk engine could not be initialized — risk checks will be no-ops.")
 
 
 def run_trading_cycle(
@@ -620,7 +653,7 @@ def run_trading_cycle(
                 p.symbol: p.market_value / account_info.equity for p in current_positions
             }
 
-        target_weights = get_ml_weights(
+        target_weights, stale_data = get_ml_weights(
             top_n=TOP_N_STOCKS,
             method=OPTIMIZER_METHOD,
             current_weights=current_weights if current_weights else None,
@@ -634,6 +667,17 @@ def run_trading_cycle(
     if not target_weights:
         logger.error("ML pipeline returned no weights — skipping this cycle")
         return False
+
+    # Circuit breaker: reduce exposure when trading on stale cached data
+    if stale_data:
+        mult = STALE_DATA_EXPOSURE_MULT
+        logger.warning(
+            f"STALE DATA detected — reducing all weights by {mult:.0%} (STALE_DATA_EXPOSURE_MULT)"
+        )
+        target_weights = {t: w * mult for t, w in target_weights.items()}
+        _send_alert(
+            f"[LiveBot] Trading on stale data — exposure reduced to {mult:.0%} of target weights."
+        )
 
     logger.info(f"Target weights from ML pipeline ({len(target_weights)} positions):")
     for ticker, w in sorted(target_weights.items(), key=lambda x: -x[1]):

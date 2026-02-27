@@ -27,7 +27,10 @@ def main():
     logger.info("  DRY RUN — ML Pipeline (no orders submitted)")
     logger.info("=" * 60)
 
-    weights = get_ml_weights(top_n=10, method="hrp")
+    weights, stale_data = get_ml_weights(top_n=10, method="hrp")
+
+    if stale_data:
+        logger.warning("WARNING: Pipeline used stale cached data — results may be degraded")
 
     if not weights:
         logger.error("Pipeline returned no weights")

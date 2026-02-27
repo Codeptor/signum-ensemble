@@ -44,6 +44,14 @@ class TestRobustWikipediaScraping:
     """H12: fetch_sp500_tickers searches all tables for a symbol column
     rather than hardcoding table[0]['Symbol']."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_ticker_cache(self, monkeypatch):
+        """Reset the in-memory ticker cache before each test so the monkeypatched
+        pd.read_html is actually called instead of returning stale cached data."""
+        import python.data.ingestion as ingestion_mod
+
+        monkeypatch.setattr(ingestion_mod, "_ticker_cache", None)
+
     def test_finds_symbol_in_first_table(self, monkeypatch):
         """Standard case: first table has a 'Symbol' column."""
         import python.data.ingestion as ingestion_mod

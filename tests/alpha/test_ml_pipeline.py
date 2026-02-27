@@ -339,9 +339,10 @@ class TestGetMlWeightsOrchestration:
         mock_rank.return_value = ["AAPL", "MSFT", "GOOG"]
         mock_optimize.return_value = {"AAPL": 0.4, "MSFT": 0.35, "GOOG": 0.25}
 
-        weights = get_ml_weights(top_n=3, method="hrp")
+        weights, stale_data = get_ml_weights(top_n=3, method="hrp")
 
         assert weights == {"AAPL": 0.4, "MSFT": 0.35, "GOOG": 0.25}
+        assert stale_data is False
         mock_train.assert_called_once()
         mock_rank.assert_called_once()
         # H11: optimize_weights now receives price_data (the raw OHLCV)
@@ -389,15 +390,18 @@ class TestGetMlWeightsOrchestration:
         mock_features.return_value = MagicMock()
         mock_rank.return_value = []  # no picks
 
-        weights = get_ml_weights(top_n=10)
+        weights, stale_data = get_ml_weights(top_n=10)
         assert weights == {}
+        assert stale_data is False
 
+    @patch("python.alpha.predict._load_cached_model")
     @patch("python.alpha.predict.train_model")
-    def test_train_failure_propagates(self, mock_train):
-        """If training fails, exception should propagate up."""
+    def test_train_failure_propagates(self, mock_train, mock_load_cached):
+        """If training fails and no cached model exists, exception propagates."""
         from python.alpha.predict import get_ml_weights
 
         mock_train.side_effect = RuntimeError("training failed")
+        mock_load_cached.return_value = (None, False)  # no cached model
 
         with pytest.raises(RuntimeError, match="training failed"):
             get_ml_weights()

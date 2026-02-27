@@ -11,20 +11,75 @@ fix requires a point-in-time membership table (e.g. Sharadar, daily
 snapshots of the index).
 """
 
+import json
 import logging
+import time
 from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
 from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
-from python.data.config import DEFAULT_INTERVAL, DEFAULT_PERIOD, RAW_DIR
+from python.data.config import (
+    DEFAULT_INTERVAL,
+    DEFAULT_PERIOD,
+    MAX_OHLCV_AGE_DAYS,
+    OHLCV_CACHE_META_PATH,
+    OHLCV_CACHE_PATH,
+    RAW_DIR,
+    TICKER_CACHE_PATH,
+    TICKER_CACHE_TTL_HOURS,
+)
 
 logger = logging.getLogger(__name__)
 
 # Default timeout in seconds for yfinance HTTP calls (M6 fix)
 # Prevents indefinite hangs from network issues or API throttling.
 YFINANCE_TIMEOUT = 30
+
+# In-memory ticker cache: (tickers, fetch_timestamp)
+_ticker_cache: tuple[list[str], float] | None = None
+
+
+def fetch_sp500_tickers() -> list[str]:
+    """Fetch S&P 500 tickers with in-memory + disk cache.
+
+    Returns cached list if it's younger than ``TICKER_CACHE_TTL_HOURS``.
+    Falls back to the disk cache if Wikipedia is unreachable.
+    """
+    global _ticker_cache
+
+    # 1. In-memory cache (fastest)
+    if _ticker_cache is not None:
+        tickers, ts = _ticker_cache
+        age_hours = (time.time() - ts) / 3600
+        if age_hours < TICKER_CACHE_TTL_HOURS:
+            return tickers
+
+    # 2. Try live scrape
+    try:
+        tickers = _fetch_sp500_tickers_live()
+        _ticker_cache = (tickers, time.time())
+        # Persist to disk for offline fallback
+        TICKER_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TICKER_CACHE_PATH.write_text(json.dumps({"tickers": tickers, "ts": time.time()}))
+        return tickers
+    except Exception as e:
+        logger.warning(f"Wikipedia scrape failed: {e} — trying disk cache")
+
+    # 3. Disk cache fallback
+    if TICKER_CACHE_PATH.exists():
+        try:
+            data = json.loads(TICKER_CACHE_PATH.read_text())
+            tickers = data["tickers"]
+            age_hours = (time.time() - data["ts"]) / 3600
+            logger.info(f"Using cached ticker list ({len(tickers)} tickers, {age_hours:.0f}h old)")
+            _ticker_cache = (tickers, data["ts"])
+            return tickers
+        except Exception as e2:
+            logger.error(f"Disk ticker cache also failed: {e2}")
+
+    raise RuntimeError("Cannot obtain S&P 500 ticker list: Wikipedia and disk cache both failed")
 
 
 @retry(
@@ -33,8 +88,8 @@ YFINANCE_TIMEOUT = 30
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
-def fetch_sp500_tickers() -> list[str]:
-    """Fetch current S&P 500 constituent tickers from Wikipedia.
+def _fetch_sp500_tickers_live() -> list[str]:
+    """Scrape S&P 500 tickers from Wikipedia (with retry).
 
     H12 fix: the scraping is made more robust against Wikipedia table
     structure changes by searching all tables for one containing a

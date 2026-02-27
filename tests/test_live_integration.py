@@ -209,7 +209,7 @@ class TestRunTradingCycleIntegration:
     def test_fresh_portfolio_buys_all_targets(self, _sleep, mock_ml, account, prices, risk_manager):
         """From empty portfolio, all target weights become buy orders."""
         target_weights = {"AAPL": 0.4, "MSFT": 0.3, "GOOG": 0.3}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         broker = MockBroker(account=account, prices=prices)
         bridge = ExecutionBridge(
@@ -273,7 +273,7 @@ class TestRunTradingCycleIntegration:
         # when no price is available.  This is a known limitation.
         # Instead, include TSLA as a target with 0 weight to verify sells work.
         target_weights = {"AAPL": 0.25, "GOOG": 0.25, "MSFT": 0.25, "TSLA": 0.25}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         broker = MockBroker(account=account, positions=positions, prices=prices)
         bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=100_000.0)
@@ -331,7 +331,7 @@ class TestRunTradingCycleIntegration:
         open_orders = [regular_order, bracket_sl]
 
         target_weights = {"AAPL": 0.5, "MSFT": 0.5}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         # Include an existing MSFT position so the bracket SL leg
         # for MSFT is NOT orphaned (H3 cleanup runs before stale order cancellation)
@@ -398,7 +398,7 @@ class TestRunTradingCycleIntegration:
     @patch("time.sleep", return_value=None)
     def test_empty_weights_returns_false(self, _sleep, mock_ml, account, prices, risk_manager):
         """If ML returns empty dict, cycle returns False with no orders."""
-        mock_ml.return_value = {}
+        mock_ml.return_value = ({}, False)
 
         broker = MockBroker(account=account, prices=prices)
         bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=100_000.0)
@@ -479,7 +479,7 @@ class TestSLTPAttachment:
         prices = {"AAPL": fill_price}
 
         target_weights = {"AAPL": 1.0}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         # Return a known ATR value so stops are deterministic
         atr_value = 6.7
@@ -523,7 +523,7 @@ class TestSLTPAttachment:
         ]
         # Target reduces AAPL and adds MSFT — AAPL sell should not get SL/TP
         target_weights = {"AAPL": 0.2, "MSFT": 0.8}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         broker = MockBroker(account=account, positions=positions, prices=prices)
         bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=100_000.0)
@@ -565,7 +565,7 @@ class TestBridgeBrokerSync:
             status="ACTIVE",
         )
         target_weights = {"AAPL": 0.5, "MSFT": 0.5}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         broker = MockBroker(account=account, prices=prices)
         bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=100_000.0)
@@ -605,7 +605,7 @@ class TestBridgeBrokerSync:
         # Keep AAPL at 20% → needs 100 shares at $200 ($20k)
         # Add MSFT at 20% → needs 50 shares at $400 ($20k)
         target_weights = {"AAPL": 0.2, "MSFT": 0.2, "GOOG": 0.6}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         broker = MockBroker(account=account, positions=positions, prices=prices)
         bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=100_000.0)
@@ -648,7 +648,7 @@ class TestOCOTopUpQty:
 
         # Increase to 50% weight: needs 250 shares total ($50k/$200), so buy 150 more
         target_weights = {"AAPL": 0.50}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         broker = MockBroker(account=account, positions=positions, prices=prices)
         bridge = ExecutionBridge(
@@ -702,7 +702,7 @@ class TestRenormClamp:
         """
         # Give equal weights to 4 tickers, but one won't have a price
         target_weights = {"AAPL": 0.25, "MSFT": 0.25, "GOOG": 0.25, "UNKNOWN": 0.25}
-        mock_ml.return_value = target_weights
+        mock_ml.return_value = (target_weights, False)
 
         # Only 3 tickers have prices (UNKNOWN will be dropped)
         broker = MockBroker(account=account, prices=prices)

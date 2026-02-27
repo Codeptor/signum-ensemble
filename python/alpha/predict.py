@@ -8,11 +8,19 @@ import hashlib
 import json
 import logging
 import tempfile
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import joblib
 import pandas as pd
+
+from python.data.config import (
+    MAX_OHLCV_AGE_DAYS,
+    OHLCV_CACHE_META_PATH,
+    OHLCV_CACHE_PATH,
+    STALE_DATA_EXPOSURE_MULT,
+)
 
 from python.alpha.features import (
     FEATURE_NEUTRAL_DEFAULTS,
@@ -71,15 +79,94 @@ _last_drift_report: dict | None = None
 _last_raw_ohlcv: pd.DataFrame | None = None
 
 
-def _load_cached_model() -> CrossSectionalModel | None:
-    """Load a cached model if it was trained today. Returns None if stale or missing."""
+def _persist_ohlcv_cache(raw_ohlcv: pd.DataFrame) -> None:
+    """Save scoring OHLCV to disk for offline fallback.
+
+    Persists the DataFrame as parquet alongside a JSON metadata file
+    containing the save timestamp.  Uses atomic write (tmp + rename).
+    """
+    try:
+        OHLCV_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_pq = OHLCV_CACHE_PATH.with_suffix(".tmp")
+        raw_ohlcv.to_parquet(tmp_pq)
+        tmp_pq.replace(OHLCV_CACHE_PATH)
+
+        meta = {"saved_ts": time.time(), "saved_at": datetime.now(tz=timezone.utc).isoformat()}
+        tmp_meta = OHLCV_CACHE_META_PATH.with_suffix(".tmp")
+        tmp_meta.write_text(json.dumps(meta))
+        tmp_meta.replace(OHLCV_CACHE_META_PATH)
+        logger.info(f"Persisted scoring OHLCV cache ({len(raw_ohlcv)} rows)")
+    except Exception as e:
+        logger.warning(f"Failed to persist OHLCV cache: {e}")
+
+
+def _load_ohlcv_cache() -> tuple[pd.DataFrame | None, bool]:
+    """Load cached scoring OHLCV from disk.
+
+    Returns:
+        ``(dataframe, is_stale)`` — *dataframe* is ``None`` when the cache
+        is missing or corrupted.  *is_stale* is ``True`` when the cache is
+        older than ``MAX_OHLCV_AGE_DAYS`` (still usable with exposure
+        reduction, but the caller should flag it).
+    """
+    if not OHLCV_CACHE_PATH.exists():
+        return None, False
+
+    try:
+        df = pd.read_parquet(OHLCV_CACHE_PATH)
+    except Exception as e:
+        logger.warning(f"OHLCV cache corrupted: {e}")
+        return None, False
+
+    # Check age from metadata
+    is_stale = False
+    if OHLCV_CACHE_META_PATH.exists():
+        try:
+            meta = json.loads(OHLCV_CACHE_META_PATH.read_text())
+            age_days = (time.time() - meta["saved_ts"]) / 86400
+            is_stale = age_days > MAX_OHLCV_AGE_DAYS
+            logger.info(f"OHLCV cache age: {age_days:.1f}d (stale={is_stale})")
+        except Exception:
+            # Missing or bad metadata — treat as stale to be safe
+            is_stale = True
+    else:
+        is_stale = True  # No metadata → assume stale
+
+    return df, is_stale
+
+
+def _load_cached_model(
+    max_age_days: int | None = None,
+) -> tuple[CrossSectionalModel | None, bool]:
+    """Load a cached model if it is recent enough.
+
+    Args:
+        max_age_days: Maximum model age in days.  Defaults to
+            ``MAX_MODEL_AGE_DAYS`` from config.  When ``0``, only
+            today's model is accepted (previous behaviour).
+
+    Returns:
+        ``(model, is_stale)`` — *model* is ``None`` when the cache is
+        missing or too old.  *is_stale* is ``True`` when the model was
+        loaded but is older than today (i.e. between 1 and
+        *max_age_days* days old).  A same-day model returns
+        ``(model, False)``.
+    """
+    from python.data.config import MAX_MODEL_AGE_DAYS as _DEFAULT_MAX_AGE
+
+    if max_age_days is None:
+        max_age_days = _DEFAULT_MAX_AGE
+
     if not MODEL_CACHE_FILE.exists():
-        return None
+        return None, False
 
     try:
         cached = joblib.load(MODEL_CACHE_FILE)
-        trained_date = cached.get("trained_date")
+        trained_date_str = cached.get("trained_date")
         model = cached.get("model")
+
+        if model is None or trained_date_str is None:
+            return None, False
 
         # R3-P-14 fix: use NY timezone for staleness check (market-day aligned)
         from zoneinfo import ZoneInfo
@@ -89,15 +176,27 @@ def _load_cached_model() -> CrossSectionalModel | None:
             today_ny = datetime.now(tz=ZoneInfo("America/New_York")).date()
         except Exception:
             pass
-        if trained_date == today_ny.isoformat() and model is not None:
-            logger.info(f"Loaded cached model from {MODEL_CACHE_FILE} (trained {trained_date})")
-            return model
 
-        logger.info(f"Cached model is stale (trained {trained_date}), will retrain")
-        return None
+        trained_date = date.fromisoformat(trained_date_str)
+        age_days = (today_ny - trained_date).days
+
+        if age_days <= max_age_days:
+            is_stale = age_days > 0
+            freshness = "same-day" if not is_stale else f"{age_days}d old"
+            logger.info(
+                f"Loaded cached model from {MODEL_CACHE_FILE} "
+                f"(trained {trained_date_str}, {freshness})"
+            )
+            return model, is_stale
+
+        logger.info(
+            f"Cached model too old (trained {trained_date_str}, "
+            f"{age_days}d > max {max_age_days}d), will retrain"
+        )
+        return None, False
     except Exception as e:
         logger.warning(f"Failed to load cached model: {e}")
-        return None
+        return None, False
 
 
 def _save_model_cache(model: CrossSectionalModel) -> None:
@@ -370,9 +469,10 @@ def train_model(
     If a model was already trained today, returns the cached version
     unless force_retrain=True.
     """
-    # Check cache first
+    # Check cache first (only accept same-day models for training —
+    # stale models are acceptable for *scoring* but not for skipping a retrain)
     if not force_retrain:
-        cached_model = _load_cached_model()
+        cached_model, _is_stale = _load_cached_model(max_age_days=0)
         if cached_model is not None:
             return cached_model
 
@@ -728,7 +828,7 @@ def get_ml_weights(
     current_weights: dict[str, float] | None = None,
     turnover_threshold: float = 0.20,
     max_weight: float | None = None,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], bool]:
     """End-to-end pipeline: train model -> rank S&P 500 -> optimize top N.
 
     This is the single entry point the live bot calls.
@@ -741,13 +841,32 @@ def get_ml_weights(
         turnover_threshold: Minimum turnover to justify rebalancing.
         max_weight: Optional cap on individual asset weight (e.g. 0.30).
 
-    Returns dict of {ticker: target_weight}.
+    Returns:
+        ``(weights, stale_data)`` — *weights* is a dict of
+        ``{ticker: target_weight}``.  *stale_data* is ``True`` when the
+        pipeline relied on cached data (model or OHLCV) that is not from
+        today.  The caller should reduce exposure by
+        ``STALE_DATA_EXPOSURE_MULT`` when *stale_data* is ``True``.
     """
     logger.info(f"=== ML Pipeline: top {top_n} stocks, {method} optimization ===")
 
+    stale_data = False  # Track if any data source is stale
+
     # Step 1: Train model on historical data
     logger.info("Step 1/4: Training model...")
-    model = train_model(data_path=training_data_path)
+    model = None
+    try:
+        model = train_model(data_path=training_data_path)
+    except Exception as e:
+        logger.warning(f"Training failed: {e} — trying stale cached model")
+        # Circuit breaker: accept a stale model up to MAX_MODEL_AGE_DAYS old
+        cached_model, model_is_stale = _load_cached_model()
+        if cached_model is not None:
+            model = cached_model
+            stale_data = stale_data or model_is_stale
+            logger.info(f"Using cached model (stale={model_is_stale}) after training failure")
+        else:
+            raise RuntimeError(f"Training failed and no cached model available: {e}") from e
 
     # IC quality gate: if the model's validation IC is too low, fall back
     # to equal-weight portfolio.  A weak model is worse than no model.
@@ -762,8 +881,8 @@ def get_ml_weights(
         if current_weights:
             tickers = list(current_weights.keys())[:top_n]
             eq_wt = 1.0 / len(tickers) if tickers else 0.0
-            return {t: eq_wt for t in tickers}
-        return {}
+            return {t: eq_wt for t in tickers}, stale_data
+        return {}, stale_data
 
     # Step 2: Fetch recent data for the full universe to rank
     logger.info("Step 2/4: Fetching recent data for universe ranking...")
@@ -772,9 +891,26 @@ def get_ml_weights(
     universe = fetch_sp500_tickers()
 
     # H11 fix: fetch raw OHLCV once and reuse for both ranking and optimization.
-    # Previously, fetch_universe fetched data for ranking, then optimize_weights
-    # fetched again independently — the two HTTP calls could return different data.
-    raw_ohlcv = fetch_ohlcv(universe, period=MIN_HISTORY_DAYS)
+    # Circuit breaker: fall back to disk-cached OHLCV on fetch failure.
+    raw_ohlcv = None
+    ohlcv_stale = False
+    try:
+        raw_ohlcv = fetch_ohlcv(universe, period=MIN_HISTORY_DAYS)
+        # Persist for offline fallback
+        _persist_ohlcv_cache(raw_ohlcv)
+    except Exception as e:
+        logger.warning(f"OHLCV fetch failed: {e} — trying disk cache")
+        cached_ohlcv, ohlcv_stale = _load_ohlcv_cache()
+        if cached_ohlcv is not None:
+            raw_ohlcv = cached_ohlcv
+            stale_data = True
+            logger.info(
+                f"Using cached OHLCV (stale={ohlcv_stale}, "
+                f"{len(raw_ohlcv)} rows) after fetch failure"
+            )
+        else:
+            raise RuntimeError(f"OHLCV fetch failed and no disk cache available: {e}") from e
+
     # Store for downstream use (e.g. ATR computation in live_bot) to avoid
     # redundant yfinance calls.
     global _last_raw_ohlcv
@@ -819,7 +955,7 @@ def get_ml_weights(
 
     if not top_tickers:
         logger.error("ML pipeline produced no stock picks — aborting")
-        return {}
+        return {}, stale_data
 
     # Step 4: Optimize weights using the SAME data (H11 fix — no double fetch)
     logger.info(f"Step 4/4: Optimizing weights for {top_tickers}...")
@@ -833,7 +969,12 @@ def get_ml_weights(
     )
 
     logger.info(f"=== ML Pipeline complete: {len(weights)} positions ===")
+    if stale_data:
+        logger.warning(
+            f"STALE DATA: pipeline used cached data. "
+            f"Caller should reduce exposure by {STALE_DATA_EXPOSURE_MULT:.0%}."
+        )
     for ticker, w in sorted(weights.items(), key=lambda x: -x[1]):
         logger.info(f"  {ticker}: {w:.1%}")
 
-    return weights
+    return weights, stale_data
