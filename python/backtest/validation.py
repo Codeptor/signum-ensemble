@@ -46,7 +46,9 @@ def walk_forward_split(
     if n_dates < n_splits + embargo_days:
         return
 
-    min_train_dates = max(1, int(n_dates * train_pct / (n_splits + train_pct * (1 - n_splits))))
+    # First fold trains on train_pct of total dates.
+    # Remaining dates are split into n_splits test windows + embargo gaps.
+    min_train_dates = max(1, int(n_dates * train_pct))
     total_test_dates = n_dates - min_train_dates - embargo_days
     test_date_size = total_test_dates // n_splits
 
