@@ -235,8 +235,15 @@ class StressTester:
         mean = self.portfolio_returns.mean() + mean_adjustment
         vol = self.portfolio_returns.std() * vol_multiplier
 
-        # Run simulations
-        simulations = rng.normal(mean, vol, (n_simulations, horizon_days))
+        # Use Student's t-distribution (df=5) instead of Gaussian to capture
+        # fat tails. Empirical equity returns exhibit excess kurtosis that
+        # Gaussian dramatically understates, leading to optimistic VaR estimates.
+        df_t = 5  # degrees of freedom — typical for daily equity returns
+        t_samples = rng.standard_t(df_t, (n_simulations, horizon_days))
+        # Scale t-samples to match desired mean and vol
+        # Variance of t(df) = df/(df-2), so scale by vol / sqrt(df/(df-2))
+        t_scale = vol / np.sqrt(df_t / (df_t - 2))
+        simulations = mean + t_scale * t_samples
         total_returns = (1 + simulations).prod(axis=1) - 1
 
         return {
