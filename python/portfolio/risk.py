@@ -48,20 +48,20 @@ class RiskEngine:
         return float(np.percentile(self.portfolio_returns, (1 - confidence) * 100))
 
     def var_cornish_fisher(self, confidence: float = 0.95) -> float:
-        """
-        VaR with Cornish-Fisher expansion for non-normality.
+        """VaR with Cornish-Fisher expansion for non-normality.
+
         Accounts for skewness and kurtosis (fat tails).
+        Returns a negative value consistent with var_parametric/var_historical.
         """
-        z = float(stats.norm.ppf(confidence))
-        s = float(stats.skew(self.portfolio_returns))  # Skewness
+        # Use loss-tail z-score (negative) — same convention as parametric VaR
+        z = float(stats.norm.ppf(1 - confidence))
+        s = float(stats.skew(self.portfolio_returns))
         k = float(stats.kurtosis(self.portfolio_returns))  # Excess kurtosis
 
-        # Cornish-Fisher expansion
+        # Cornish-Fisher expansion adjusts the z-score for non-normality
         z_cf = z + (z**2 - 1) * s / 6 + (z**3 - 3 * z) * k / 24 - (2 * z**3 - 5 * z) * s**2 / 36
 
-        # Return negative value to match var_parametric and var_historical sign convention
-        # VaR should be negative (e.g., -0.02 means 2% loss)
-        return -float(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std())
+        return float(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std())
 
     def cvar_historical(self, confidence: float = 0.95) -> float:
         """Conditional VaR (Expected Shortfall) via historical simulation."""
