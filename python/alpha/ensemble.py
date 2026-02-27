@@ -21,8 +21,10 @@ is cleaner and more reliable as a 2-model combination.
 """
 
 import logging
+from pathlib import Path
 from typing import Optional
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
@@ -285,3 +287,34 @@ class ModelEnsemble:
         )
 
         return result.sort_values("ensemble", ascending=False)
+
+    def save(self, path: str | Path) -> None:
+        """Serialize ensemble to disk via joblib.
+
+        Saves all sub-models, weights, feature_cols, and fitted state.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "feature_cols": self.feature_cols,
+            "weights": self.weights,
+            "fitted": self._fitted,
+            "lgbm_model": self.lgbm.model,
+            "rf_model": self.rf,
+        }
+        joblib.dump(state, path)
+        logger.info(f"Ensemble saved to {path}")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ModelEnsemble":
+        """Load a serialized ensemble from disk.
+
+        Returns a fitted ModelEnsemble ready for predict().
+        """
+        state = joblib.load(path)
+        ensemble = cls(feature_cols=state["feature_cols"], weights=state["weights"])
+        ensemble.lgbm.model = state["lgbm_model"]
+        ensemble.rf = state["rf_model"]
+        ensemble._fitted = state["fitted"]
+        logger.info(f"Ensemble loaded from {path}")
+        return ensemble
