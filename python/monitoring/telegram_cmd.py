@@ -9,6 +9,7 @@ Commands:
   /status    — Bot state, regime, account overview
   /positions — Current holdings with weights and P&L
   /equity    — Portfolio value, cash, buying power
+  /analytics — Performance metrics (Sharpe, Sortino, drawdown, etc.)
   /regime    — Market regime (VIX, SPY drawdown, exposure)
   /health    — System health check
   /trades    — Recent trade history from bot state
@@ -133,6 +134,7 @@ def _cmd_help() -> str:
         "/status     — Bot state, regime, account",
         "/positions  — Current holdings with P&L",
         "/equity     — Portfolio value & returns",
+        "/analytics  — Sharpe, Sortino, drawdown, etc.",
         "/regime     — Market regime (VIX, drawdown)",
         "/health     — System health check",
         "/trades     — Recent trade info",
@@ -251,6 +253,8 @@ def _cmd_equity() -> str:
     # Try to get return info from equity history
     eq_data = _dashboard_get("/api/equity")
     if eq_data and "history" in eq_data and len(eq_data["history"]) >= 2:
+        import numpy as np
+
         history = eq_data["history"]
         first = history[0]["equity"]
         last = history[-1]["equity"]
@@ -258,6 +262,16 @@ def _cmd_equity() -> str:
             total_ret = (last - first) / first * 100
             sign = "+" if total_ret >= 0 else ""
             lines.append(f"Total return: {sign}{total_ret:.2f}%")
+
+        # Quick risk snapshot from equity curve
+        if len(history) >= 5:
+            equities = np.array([float(pt["equity"]) for pt in history])
+            running_max = np.maximum.accumulate(equities)
+            drawdowns = (equities - running_max) / running_max
+            current_dd = drawdowns[-1]
+            max_dd = drawdowns.min()
+            lines.append(f"Current DD: {current_dd:.2%}")
+            lines.append(f"Max DD: {max_dd:.2%}")
 
     return "\n".join(lines)
 
@@ -337,6 +351,53 @@ def _cmd_trades() -> str:
     positions = bot.get("positions", {})
     if positions:
         lines.append(f"\nHeld tickers: {', '.join(sorted(positions.keys()))}")
+
+    return "\n".join(lines)
+
+
+@_cmd("/analytics")
+def _cmd_analytics() -> str:
+    """Portfolio performance analytics computed from equity history."""
+    import numpy as np
+
+    from python.portfolio.analytics import PerformanceAnalyzer
+
+    # Load equity history from persisted file
+    eq_data = _dashboard_get("/api/equity")
+    if eq_data is None or "history" not in eq_data:
+        return "No equity history available yet."
+
+    history = eq_data["history"]
+    if len(history) < 5:
+        return f"Need at least 5 data points for analytics (have {len(history)})."
+
+    # Extract equity values and compute daily returns
+    equities = np.array([float(pt["equity"]) for pt in history])
+    returns = np.diff(equities) / equities[:-1]
+    returns = returns[np.isfinite(returns)]
+
+    if len(returns) < 3:
+        return "Insufficient return data for analytics."
+
+    analyzer = PerformanceAnalyzer(returns)
+    report = analyzer.full_report()
+
+    lines = ["ANALYTICS\n"]
+    lines.append(f"Period: {len(returns)} trading days")
+    lines.append(f"Total return: {report.total_return:+.2%}")
+    lines.append(f"CAGR: {report.cagr:+.2%}")
+    lines.append(f"Volatility: {report.volatility:.2%}")
+    lines.append(f"Sharpe: {report.sharpe_ratio:.2f}")
+    lines.append(f"Sortino: {report.sortino_ratio:.2f}")
+    lines.append(f"Calmar: {report.calmar_ratio:.2f}")
+    lines.append(f"Max DD: {report.max_drawdown:.2%}")
+    lines.append(f"Win rate: {report.hit_rate:.1%}")
+    lines.append(f"Gain/Loss: {report.gain_loss_ratio:.2f}")
+    lines.append(f"VaR 95%: {report.var_95:.2%}")
+    lines.append(f"CVaR 95%: {report.cvar_95:.2%}")
+
+    if report.omega_ratio is not None:
+        lines.append(f"Omega: {report.omega_ratio:.2f}")
 
     return "\n".join(lines)
 
