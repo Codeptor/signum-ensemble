@@ -408,7 +408,7 @@ def get_sector_weights(
     Returns:
         Dict of sector -> aggregate weight.
     """
-    smap = sector_map or SECTOR_MAP
+    smap = sector_map or get_sector_map(list(weights.keys()))
     sector_weights: dict[str, float] = {}
     for ticker, weight in weights.items():
         sector = smap.get(ticker, "Unknown")
@@ -436,7 +436,9 @@ def enforce_sector_constraints(
     """
     import pandas as pd
 
-    smap = sector_map or SECTOR_MAP
+    # Use dynamic lookup (yfinance fallback) instead of static SECTOR_MAP
+    # so S&P 500 stocks not in the 200-ticker static map are still constrained.
+    smap = sector_map or get_sector_map(list(weights.keys()))
     w = pd.Series(weights, dtype=float)
 
     # Always renormalize input to sum to 1.0
