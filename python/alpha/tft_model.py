@@ -76,21 +76,20 @@ class TFTAlphaModel:
         # Use global date rank as time index so all tickers share the same
         # calendar-aligned axis. Per-ticker cumcount causes misaligned splits
         # where the same time_idx maps to different calendar dates across tickers.
-        if hasattr(df.index, "get_level_values"):
-            try:
-                date_col = data.index.get_level_values(0) if not data.index.names == [None] else data["date"]
-            except Exception:
-                date_col = data.index
-        else:
-            date_col = data.index
-        # Reset index to work with columns
         if "date" not in data.columns:
-            data = data.reset_index()
-            if "level_0" in data.columns:
-                data = data.rename(columns={"level_0": "date"})
-        unique_dates = sorted(data["date"].unique())
+            # Extract date from index (could be DatetimeIndex or MultiIndex)
+            if hasattr(data.index, "get_level_values"):
+                date_values = data.index.get_level_values(0)
+            else:
+                date_values = data.index
+            data = data.reset_index(drop=True)
+            data["_date"] = date_values
+        else:
+            data["_date"] = data["date"]
+        unique_dates = sorted(data["_date"].unique())
         date_to_idx = {d: i for i, d in enumerate(unique_dates)}
-        data["time_idx"] = data["date"].map(date_to_idx)
+        data["time_idx"] = data["_date"].map(date_to_idx)
+        data = data.drop(columns=["_date"])
 
         # Drop rows with NaN targets (filling with 0.0 fabricates zero-return labels)
         data = data.dropna(subset=[self.target_col])
