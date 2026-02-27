@@ -37,8 +37,9 @@ FEATURE_COLS = [
     "rsi_14",
     "bb_position",
     "mr_zscore_60",
-    # Volatility (1) — risk adjustment
+    # Volatility (2) — close-to-close + Yang-Zhang (OHLC, 8x more efficient)
     "vol_20d",
+    "vol_yz_20d",
     # Volume (1) — confirm momentum with volume
     "volume_ratio",
     # Cross-sectional (2) — relative strength + sector-relative momentum
@@ -68,6 +69,8 @@ FEATURE_COLS_FULL = [
     "dollar_volume_20d",
     "amihud_illiq",
     "bid_ask_proxy",
+    "vol_yz_20d",
+    "vol_park_20d",
     # Cross-sectional features
     "cs_ret_rank_5d",
     "cs_ret_rank_20d",

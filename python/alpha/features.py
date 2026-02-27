@@ -8,6 +8,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from python.risk.volatility import parkinson, yang_zhang
+
 logger = logging.getLogger(__name__)
 
 # R3-P-4 fix: resolve paths relative to project root, not CWD
@@ -29,6 +31,8 @@ _WINSORIZE_COLS = [
     "volume_ratio",
     "amihud_illiq",
     "bid_ask_proxy",
+    "vol_yz_20d",
+    "vol_park_20d",
 ]
 
 # C9 fix: Neutral default values for features when data is unavailable.
@@ -52,6 +56,8 @@ FEATURE_NEUTRAL_DEFAULTS: dict[str, float] = {
     "cs_ret_rank_20d": 0.5,
     "cs_vol_rank_20d": 0.5,
     "cs_volume_rank": 0.5,
+    "vol_yz_20d": 0.015,  # ~24% annualised vol (same as vol_20d)
+    "vol_park_20d": 0.015,
 }
 
 
@@ -252,6 +258,15 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     log_ret = np.log(ratio)
     for w in [5, 10, 20]:
         df[f"vol_{w}d"] = log_ret.rolling(w).std()
+
+    # Yang-Zhang volatility (8x more efficient than close-to-close, uses OHLC)
+    # Returns annualized vol — divide by sqrt(252) to get daily scale matching vol_20d
+    yz = yang_zhang(o.values, h.values, lo.values, c.values, window=20, annualize=1)
+    df["vol_yz_20d"] = yz
+
+    # Parkinson range-based volatility (5x more efficient, uses high-low)
+    park = parkinson(h.values, lo.values, window=20, annualize=1)
+    df["vol_park_20d"] = park
 
     # RSI
     for w in [14]:
