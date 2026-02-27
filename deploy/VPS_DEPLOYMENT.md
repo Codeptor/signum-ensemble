@@ -2,12 +2,23 @@
 
 This guide walks you through deploying the Signum trading bot on a VPS (Virtual Private Server) for paper trading.
 
+## Current Deployment
+
+The bot is live on DigitalOcean:
+- **VPS:** 209.38.122.78 (2 vCPU, 4 GB RAM, 80 GB disk, Ubuntu 22.04, Bangalore)
+- **Services:** `signum-bot` (trading) + `signum-dashboard` (web UI on port 8050)
+- **Dashboard:** Public at `https://dashboard.bhanueso.dev` (nginx + Let's Encrypt)
+- **Telegram:** Alerts + interactive commands via `@sigum_paperbot`
+- **SSH:** `ssh -i deploy/signum_ed25519 root@209.38.122.78`
+- **Resource usage:** ~530 MB RAM (14%), 5.2 GB disk (7%), CPU idle at 1-3%
+
 ## Prerequisites
 
 - VPS with Ubuntu 20.04+ or Debian 11+
-- At least 2GB RAM, 10GB disk space
+- At least 2GB RAM, 10GB disk space (4GB RAM recommended for ML training)
 - Root or sudo access
 - Alpaca Paper Trading API credentials
+- Telegram bot token (from @BotFather) for alerts
 
 ## Quick Start
 
@@ -54,15 +65,27 @@ This will:
 sudo nano /opt/signum/.env
 ```
 
-Add your Alpaca Paper Trading credentials:
+Add your credentials:
 
 ```bash
 # REQUIRED: Alpaca Paper Trading API
 ALPACA_API_KEY=your_paper_api_key_here
 ALPACA_API_SECRET=your_paper_api_secret_here
 
+# RECOMMENDED: Telegram Bot (alerts + commands)
+# Create bot via @BotFather, message it, get chat_id from getUpdates API
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+
 # Optional: Alert Webhook (Slack/Discord)
 ALERT_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+
+# Optional: Email alerts (Resend or SendGrid — SMTP is blocked on most cloud VPS)
+RESEND_API_KEY=
+RESEND_FROM_EMAIL=Signum Bot <onboarding@resend.dev>
+SENDGRID_API_KEY=
+SENDGRID_FROM_EMAIL=
+ALERT_EMAIL_TO=your_email@gmail.com
 
 # Risk Parameters (defaults are safe for paper trading)
 MAX_POSITION_WEIGHT=0.30
@@ -72,6 +95,8 @@ MAX_DRAWDOWN_LIMIT=0.15
 ```
 
 **Get your API keys from:** https://app.alpaca.markets/paper/dashboard
+
+**Note:** DigitalOcean (and most cloud VPS) blocks outbound SMTP (ports 25/465/587). Use Telegram or HTTP-based email APIs (Resend/SendGrid on port 443) instead.
 
 ### 5. Test Before Starting Service
 
@@ -114,7 +139,24 @@ sudo journalctl -u signum-bot -f
 
 ## Monitoring
 
-### Check Bot Status
+### Telegram Bot (Primary — from your phone)
+
+Send these commands to your Telegram bot:
+
+| Command | What |
+|---------|------|
+| `/status` | Bot state, regime, account overview |
+| `/positions` | Current holdings with P&L |
+| `/equity` | Portfolio value, cash, buying power |
+| `/regime` | VIX, SPY drawdown, exposure |
+| `/health` | System health check |
+| `/trades` | Recent trade info |
+| `/logs` | Last 20 log lines |
+| `/help` | All commands |
+
+The bot also sends automatic alerts (18 events) for startup, trade summaries, regime changes, crashes, and kill switches.
+
+### Server-Side
 
 ```bash
 # Service status
@@ -124,28 +166,35 @@ sudo systemctl status signum-bot
 sudo journalctl -u signum-bot --since "1 hour ago"
 
 # Live log tail
-sudo tail -f /var/log/signum/signum.log
+sudo tail -f /var/log/signum/bot.log
 
 # Error logs
-sudo tail -f /var/log/signum/signum-error.log
+sudo tail -f /var/log/signum/bot-error.log
+
+# Health check
+curl http://localhost:8050/healthz
 ```
+
+### Dashboard
+
+Public at `https://dashboard.bhanueso.dev` or via SSH tunnel:
+```bash
+ssh -L 8050:localhost:8050 -i deploy/signum_ed25519 root@209.38.122.78
+# Then open http://localhost:8050
+```
+
+### JSON API
+
+12 endpoints at `http://localhost:8050/api/...` — see README for full list.
 
 ### View Trading Activity
 
 ```bash
 # Check state file
-sudo cat /opt/signum/data/bot_state.json
+cat /opt/signum/data/bot_state.json
 
-# View current positions (if any)
-sudo -u signum /opt/signum/.venv/bin/python -c "
-from python.brokers.alpaca_broker import AlpacaBroker
-import os
-broker = AlpacaBroker(paper_trading=True, api_key=os.getenv('ALPACA_API_KEY'), api_secret=os.getenv('ALPACA_API_SECRET'))
-broker.connect()
-positions = broker.list_positions()
-for p in positions:
-    print(f'{p.symbol}: {p.qty} shares @ ${p.avg_entry_price:.2f}')
-"
+# Quick position check via API
+curl -s http://localhost:8050/api/positions | python3 -m json.tool
 ```
 
 ## Management Commands
@@ -186,13 +235,16 @@ sudo systemctl restart signum-bot
 
 The bot includes multiple safety mechanisms:
 
-1. **Paper Trading Mode**: Only paper trading is enabled by default
-2. **Duplicate Trade Guard**: Prevents trading twice on the same day
-3. **Position Limits**: Max 30% per position (configurable)
-4. **Stop Loss**: 5% automatic stop-loss on all positions
-5. **Max Drawdown**: Trading halts if portfolio drops 15%
-6. **Crash Recovery**: Service restarts automatically with backoff
-7. **State Persistence**: Tracks daily trades across restarts
+1. **Paper Trading Mode**: Only paper trading is enabled by default (`LIVE_TRADING=true` required for real money)
+2. **Duplicate Trade Guard**: Prevents trading twice on the same day (checks Alpaca order history)
+3. **Position Limits**: Max 30% per position (configurable via `.env`)
+4. **ATR-Based Stops**: 2x ATR stop-loss, 3x ATR take-profit (adapts to each stock's volatility)
+5. **Max Drawdown Kill Switch**: Liquidates all positions if portfolio drops 15%
+6. **Regime Detection**: VIX/SPY drawdown monitoring — reduces to 50% exposure in caution, liquidates in halt
+7. **Crash Recovery**: `systemctl Restart=on-failure` with backoff
+8. **State Persistence**: Atomic writes to `data/bot_state.json` across restarts
+9. **Telegram Alerts**: 18 event types with severity levels, CRITICAL bypasses rate limits
+10. **Log Rotation**: Python `RotatingFileHandler` (10MB x 5) + system `logrotate` (weekly, 12 weeks compressed)
 
 ## Troubleshooting
 
@@ -290,7 +342,7 @@ sudo find /opt/signum/data -name "*.json" -mtime +30 -delete
 
 ---
 
-**⚠️ IMPORTANT**: This bot is configured for **PAPER TRADING ONLY** by default. To switch to live trading:
-1. Change `paper_trading=True` to `paper_trading=False` in `examples/live_bot.py`
+**IMPORTANT**: This bot is configured for **PAPER TRADING ONLY** by default. To switch to live trading:
+1. Set `LIVE_TRADING=true` in `.env` (do NOT edit source code)
 2. Use Alpaca Live API keys (not Paper keys)
-3. **WARNING**: Real money will be at risk!
+3. **WARNING**: Real money will be at risk. Paper trade for 3+ months first.

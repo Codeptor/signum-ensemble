@@ -1,7 +1,7 @@
 # Signum
 
 [![CI](https://github.com/Codeptor/signum/actions/workflows/ci.yml/badge.svg)](https://github.com/Codeptor/signum/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-510%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-589%20passed-brightgreen)]()
 [![Paper Trading](https://img.shields.io/badge/status-paper%20trading-blue)]()
 
 Automated quantitative equity trading system. Trains a LightGBM model weekly on S&P 500 data, selects top 10 stocks by predicted 5-day return, optimizes portfolio weights via HRP, and executes through Alpaca with ATR-based stop-loss/take-profit brackets.
@@ -16,7 +16,7 @@ Every Wednesday at market open, the bot runs a full cycle:
 Scrape S&P 500 tickers (Wikipedia)
         │
         ▼
-Fetch 2yr daily OHLCV (yfinance, 100 random tickers for training)
+Fetch 2yr daily OHLCV (yfinance, full ~500 S&P 500 universe)
         │
         ▼
 Compute 22 alpha features (momentum, volatility, RSI, volume, cross-sectional ranks, VIX)
@@ -43,7 +43,7 @@ Execute via Alpaca (sells first, then buys, poll for fills)
 Attach OCO brackets (SL = 2x ATR below fill, TP = 3x ATR above fill)
         │
         ▼
-Persist state, log to MLflow, sleep until next Wednesday
+Send trade summary via Telegram, persist state, sleep until next Wednesday
 ```
 
 Between Wednesdays the bot sleeps. GTC stop-loss and take-profit orders sit on Alpaca's servers and fire automatically.
@@ -123,9 +123,45 @@ signum-deploy     Push local code to VPS and restart
 
 ## Monitoring
 
-### Dashboard (port 8050)
+### Telegram Bot (Primary)
 
-Access via SSH tunnel: `ssh -L 8050:localhost:8050 user@vps-ip`
+Control the bot from your phone via Telegram commands:
+
+| Command | What it does |
+|---------|-------------|
+| `/status` | Bot state, regime, account overview |
+| `/positions` | Current holdings with weights and P&L |
+| `/equity` | Portfolio value, cash, buying power, total return |
+| `/regime` | Market regime (VIX, SPY drawdown, exposure) |
+| `/health` | System health check |
+| `/trades` | Recent trade info |
+| `/logs` | Last 20 log lines |
+| `/help` | List all commands |
+
+Setup: create a bot via [@BotFather](https://t.me/BotFather), set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
+
+### Alerts (18 events)
+
+Automatic Telegram alerts for all critical events:
+
+| Event | Severity |
+|-------|----------|
+| Bot startup / shutdown | INFO |
+| Trade cycle summary (fills, equity, holdings) | INFO |
+| Hourly heartbeat (silence = problem) | INFO |
+| Stale data, order timeout, partial fill | WARNING |
+| OCO bracket failure, risk violation, order rejection | WARNING |
+| Caution mode (VIX/drawdown elevated) | WARNING |
+| ML pipeline failure, Alpaca connection failure | CRITICAL |
+| Halt mode, drawdown kill switch, liquidation | CRITICAL |
+
+CRITICAL alerts bypass rate limiting. All others rate-limited to 20/5min.
+
+Transport priority: Telegram (always) > Resend > SendGrid > SMTP for email.
+
+### Dashboard
+
+Public at `https://dashboard.bhanueso.dev` (nginx reverse proxy + Let's Encrypt SSL).
 
 Two tabs:
 - **Live** — account overview, open positions, regime beacon, equity curve, bot log viewer
@@ -133,7 +169,7 @@ Two tabs:
 
 ### JSON API
 
-11 endpoints, all return structured JSON with CORS headers:
+12 endpoints, all return structured JSON with CORS headers:
 
 | Endpoint | Returns |
 |----------|---------|
@@ -148,14 +184,7 @@ Two tabs:
 | `GET /api/bot` | Bot state (last trade, shutdown reason) |
 | `GET /api/backtest` | Backtest metrics and risk summary |
 | `GET /api/logs` | Bot log lines (`?lines=N`, default 80, max 500) |
-
-### Alerts
-
-Set `ALERT_WEBHOOK_URL` in `.env` to a Slack/Discord webhook for:
-- Drawdown kill switch triggered (>15%)
-- Regime halt/caution transitions
-- ML pipeline failures
-- Feature drift detected
+| `GET /healthz` | Health check (bot liveness, alerting, data freshness) |
 
 ## Risk Controls
 
@@ -220,12 +249,15 @@ signum/
 │   │   ├── robustness.py        # Monte Carlo, block bootstrap, stress tests
 │   │   └── regime_analysis.py   # Per-regime performance breakdown
 │   └── monitoring/
-│       ├── dashboard.py         # Dash web UI + JSON API (11 endpoints)
+│       ├── alerting.py          # Multi-channel alerts (Telegram, Resend, SendGrid, SMTP, webhook)
+│       ├── telegram_cmd.py      # Telegram command handler (/status, /positions, etc.)
+│       ├── dashboard.py         # Dash web UI + JSON API (12 endpoints + /healthz)
 │       ├── drift.py             # KS test + PSI feature drift detection
 │       └── regime.py            # VIX/SPY-based regime detector
 ├── deploy/
-│   └── signum-bot.service       # systemd service file
-├── tests/                       # 510 tests
+│   ├── signum-bot.service       # systemd service file (trading bot)
+│   └── signum-dashboard.service # systemd service file (web dashboard)
+├── tests/                       # 589 tests
 ├── rust/matching-engine/        # Lock-free order book (sub-microsecond)
 ├── run_live_bot.sh              # Bash wrapper with crash recovery
 ├── .env.example                 # Environment variable template
@@ -253,8 +285,10 @@ MAX_DRAWDOWN_LIMIT=0.15      # 15% kill switch
 ATR_SL_MULTIPLIER=2.0        # Stop-loss at 2x ATR
 ATR_TP_MULTIPLIER=3.0        # Take-profit at 3x ATR
 
-# Alerts (optional)
-ALERT_WEBHOOK_URL=           # Slack/Discord webhook
+# Alerts (recommended)
+TELEGRAM_BOT_TOKEN=          # From @BotFather
+TELEGRAM_CHAT_ID=            # Your chat ID
+ALERT_WEBHOOK_URL=           # Slack/Discord webhook (optional)
 ```
 
 ## Backtest Results
@@ -284,14 +318,16 @@ Three rounds of code audit (113+ findings resolved):
 
 Key fixes: OCO order construction, train/inference winsorization parity, date-space purged k-fold, geometric Sharpe standardization, Ledoit-Wolf covariance shrinkage, regime de-escalation logic, risk manager weight tracking, dynamic sector classification.
 
+Post-audit additions: yfinance circuit breaker, centralized alerting module (Telegram + email), Telegram command handler, /healthz endpoint, structured JSON logging.
+
 ## Tests
 
 ```bash
 uv run python -m pytest tests/ -x -q --tb=short
-# 510 passed in ~80s
+# 589 passed in ~77s
 ```
 
-Coverage includes: ML pipeline (features, model, ensemble, predict), portfolio optimization, risk engine, risk manager, execution bridge, broker integration, backtest validation, robustness analysis, live bot helpers, and full integration tests.
+Coverage includes: ML pipeline (features, model, ensemble, predict), portfolio optimization, risk engine, risk manager, execution bridge, broker integration, backtest validation, robustness analysis, live bot helpers, alerting (Telegram, SendGrid, SMTP, webhook), Telegram command handler, and full integration tests.
 
 ## Tech Stack
 
@@ -302,8 +338,9 @@ Coverage includes: ML pipeline (features, model, ensemble, predict), portfolio o
 | Data | yfinance, pandas |
 | Risk | scipy, numpy |
 | Monitoring | Dash, Plotly, Flask (JSON API) |
+| Alerting | Telegram Bot API, Resend, SendGrid, SMTP, webhooks |
 | Broker | Alpaca Markets API (`alpaca-trade-api`) |
-| MLOps | MLflow |
+| Infra | DigitalOcean VPS, systemd, nginx, Let's Encrypt |
 | Matching Engine | Rust, BTreeMap, Criterion.rs |
 
 ## Design Decisions

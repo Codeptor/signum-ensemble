@@ -420,13 +420,14 @@ These items from the Round 1 re-audit were not addressed in Round 2 because they
 ## Part 5: Final Paper-Trading Readiness Verdict
 
 **Date:** 2026-02-27 (updated)
-**Test baseline:** 441 tests passing (full suite), 0 failures
+**Test baseline:** 589 tests passing (full suite), 0 failures
 
-### Assessment: READY FOR PAPER TRADING
+### Assessment: LIVE AND PAPER TRADING
 
 Both audit branches have been merged to `main`. An additional 12 post-merge
 fixes resolved all remaining timezone, exception handling, and code correctness
-issues. No known blockers remain.
+issues. The bot is deployed on a DigitalOcean VPS and actively paper trading
+with $100k via Alpaca. No known blockers remain.
 
 ### Completed Post-Merge Fixes (commit `184e029`)
 
@@ -441,12 +442,20 @@ issues. No known blockers remain.
 | `print()` cleanup | `risk_attribution.py` | Replaced with `logger.error()` |
 | Hanging test fix | `test_live_bot_helpers.py` | Added missing `should_rebalance_today` mock |
 
-### Deployment Checklist
+### Deployment Status
 
-1. Create `.env` from `.env.example` with valid Alpaca paper trading credentials
-2. Run full test suite: `uv run pytest tests/ -q` — must pass 441 tests
-3. Dry run: `source .env && uv run python examples/dry_run.py`
-4. Start: `source .env && ./run_live_bot.sh`
+The bot is deployed and running on DigitalOcean VPS (`209.38.122.78`):
+- **`signum-bot.service`** — trading bot (auto-restart on crash, starts on boot)
+- **`signum-dashboard.service`** — web dashboard at `https://dashboard.bhanueso.dev`
+- **Telegram Bot** — alerts + interactive commands (`@sigum_paperbot`)
+- **Log rotation** — Python `RotatingFileHandler` (10MB x 5) + system `logrotate` (weekly, 12 weeks)
+
+### Deployment Checklist (for new deployments)
+
+1. Create `.env` from `.env.example` with Alpaca paper trading credentials
+2. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for alerts
+3. Run full test suite: `uv run pytest tests/ -q` — must pass 589 tests
+4. Deploy: `scp` files to VPS, `systemctl restart signum-bot`
 
 ### What Is Now Solid
 
@@ -456,8 +465,9 @@ issues. No known blockers remain.
 | **Execution Correctness** | Strong | OCO order fix, partial fill reconciliation, timeout handling, liquidation safety, renorm-clamp loop, timezone consistency |
 | **Risk Management** | Strong | Severity levels corrected, weights initialized, sector exposure uses abs(), drawdown kill switch wired to live equity, stale position closes bypass risk check |
 | **Data Quality** | Strong | Per-ticker NaN handling, auto_adjust=True, wiki scrape validation, MultiIndex-safe extraction, macro bfill+defaults |
-| **Operational Robustness** | Strong | Crash recovery (`run_live_bot.sh` + systemd), duplicate execution guard, atomic state write, batch price fetch, stale VIX detection |
-| **Test Coverage** | Good | 415 tests, 8 new audit-specific tests, integration tests for live path |
+| **Operational Robustness** | Strong | Crash recovery (systemd `Restart=on-failure`), duplicate execution guard, atomic state write, batch price fetch, stale VIX detection, yfinance circuit breaker |
+| **Alerting & Observability** | Strong | Telegram Bot alerts (18 events, 3 severity levels), interactive commands (/status, /positions, /equity, /regime, /health, /trades, /logs), /healthz endpoint, structured JSON logging, rate limiting (20/5min, CRITICAL bypasses) |
+| **Test Coverage** | Good | 589 tests, audit-specific tests, alerting tests, Telegram command tests, integration tests for live path |
 | **Portfolio Optimization** | Good | HRP with Ledoit-Wolf shrinkage, iterative weight capping, turnover-aware rebalancing |
 | **Regime Detection** | Good | Hysteresis bands, OR de-escalation logic, stale VIX fallback |
 
@@ -466,12 +476,12 @@ issues. No known blockers remain.
 | Limitation | Impact | Mitigation |
 |------------|--------|------------|
 | **Survivorship bias** | Backtest returns inflated ~1-3% annually | Training on current S&P 500 members only; mitigated by 2y lookback (H-SURV). Acceptable for paper trading; not for live capital. |
-| **No drift detection in live path** | Model may degrade silently | Monitor daily predictions visually; DriftDetector exists but is not wired into the live bot loop. |
+| **No drift detection in live path** | Model may degrade silently | Monitor via `/drift` API endpoint and Telegram `/status` command; DriftDetector exists but is not wired into the live bot loop. |
 | **`rolling_beta` crash** | Dashboard-only, not live path | Do not call `RiskEngine.rolling_beta()` until fixed. |
 | **VaR sign inconsistency** | Analytics-only | `abs()` workaround in risk manager is safe. |
 | **No point-in-time index membership** | Training universe is current, not historical | Standard limitation for free data sources. Use Sharadar or similar for production. |
 | **`alpaca-trade-api` deprecated** | May break with future Alpaca API changes | Plan migration to `alpaca-py` before going live with real capital. |
-| **Risk params hardcoded** | Cannot tune without editing source | `MAX_POSITION_WEIGHT=0.30`, `TOP_N_STOCKS=10`, etc. are constants in `live_bot.py`. |
+| **Risk params hardcoded** | Cannot tune without editing source | `MAX_POSITION_WEIGHT=0.30`, `TOP_N_STOCKS=10`, etc. are env-configurable in `live_bot.py` via `.env`. |
 
 ### Recommended First-Week Paper Trading Protocol
 
