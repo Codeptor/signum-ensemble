@@ -21,7 +21,7 @@ def walk_forward_split(
     df: pd.DataFrame,
     n_splits: int = 5,
     train_pct: float = 0.6,
-    embargo_days: int = 5,
+    embargo_days: int = 22,
 ):
     """Walk-forward cross-validation with embargo period.
 
