@@ -29,18 +29,21 @@ logger = logging.getLogger(__name__)
 #   - Removed noisy microstructure features (amihud_illiq, dollar_volume_20d)
 #   - Kept only features with distinct predictive signals
 FEATURE_COLS = [
-    # Momentum (2) — short and medium-term return signals
+    # Momentum (3) — short, medium-term, and Jegadeesh-Titman 12-1
     "ret_5d",
     "ret_20d",
-    # Mean reversion (2) — identify overbought/oversold
+    "mom_12_1",
+    # Mean reversion (3) — RSI, Bollinger, z-score
     "rsi_14",
     "bb_position",
+    "mr_zscore_60",
     # Volatility (1) — risk adjustment
     "vol_20d",
     # Volume (1) — confirm momentum with volume
     "volume_ratio",
-    # Cross-sectional (1) — relative strength
+    # Cross-sectional (2) — relative strength + sector-relative momentum
     "cs_ret_rank_5d",
+    "sector_rel_mom",
 ]
 
 # Full feature set preserved for comparison / ablation studies
@@ -48,6 +51,7 @@ FEATURE_COLS_FULL = [
     "ret_5d",
     "ret_10d",
     "ret_20d",
+    "mom_12_1",
     "ma_ratio_5",
     "ma_ratio_10",
     "ma_ratio_20",
@@ -59,6 +63,7 @@ FEATURE_COLS_FULL = [
     "macd",
     "macd_signal",
     "bb_position",
+    "mr_zscore_60",
     "volume_ratio",
     "dollar_volume_20d",
     "amihud_illiq",
@@ -68,6 +73,7 @@ FEATURE_COLS_FULL = [
     "cs_ret_rank_20d",
     "cs_vol_rank_20d",
     "cs_volume_rank",
+    "sector_rel_mom",
     # Macro regime features
     "vix",
     "vix_ma_ratio",

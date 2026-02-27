@@ -293,3 +293,65 @@ class TestComputeAlphaFeaturesWinsorizes:
             # After winsorize at 0.5/99.5th, the range should be reasonable
             assert valid.max() < 10.0, "ret_5d not winsorized (extreme max)"
             assert valid.min() > -10.0, "ret_5d not winsorized (extreme min)"
+
+
+# =====================================================================
+# Tests for new features: momentum 12-1, mean-reversion z-score,
+# sector-relative momentum
+# =====================================================================
+
+
+@pytest.fixture
+def long_prices():
+    """Multi-ticker OHLCV data with enough history for mom_12_1 (>252 days)."""
+    dates = pd.date_range("2020-01-01", periods=300, freq="B")
+    np.random.seed(42)
+    tickers = ["AAPL", "MSFT"]
+    frames = []
+    for ticker in tickers:
+        base = 150 + np.cumsum(np.random.randn(300) * 2)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "ticker": ticker,
+                    "open": base + np.random.randn(300),
+                    "high": base + abs(np.random.randn(300)) * 2,
+                    "low": base - abs(np.random.randn(300)) * 2,
+                    "close": base,
+                    "volume": np.random.randint(500000, 2000000, 300).astype(float),
+                },
+                index=dates,
+            )
+        )
+    return pd.concat(frames)
+
+
+class TestNewFeatures:
+    def test_mr_zscore_column_exists(self, sample_prices):
+        features = compute_alpha_features(sample_prices)
+        assert "mr_zscore_60" in features.columns
+
+    def test_mr_zscore_bounded(self, sample_prices):
+        """Z-score should be roughly in [-4, 4] for normal data."""
+        features = compute_alpha_features(sample_prices)
+        valid = features["mr_zscore_60"].dropna()
+        if len(valid) > 0:
+            assert valid.max() < 10.0
+            assert valid.min() > -10.0
+
+    def test_mom_12_1_column_exists(self, sample_prices):
+        features = compute_alpha_features(sample_prices)
+        assert "mom_12_1" in features.columns
+
+    def test_mom_12_1_with_long_history(self, long_prices):
+        """With sufficient history, mom_12_1 should have valid values."""
+        features = compute_alpha_features(long_prices)
+        valid = features["mom_12_1"].dropna()
+        # With 300 days, we should have some valid mom_12_1 values
+        assert len(valid) > 0
+
+    def test_sector_rel_mom_column(self, sample_prices):
+        """After cross-sectional features, sector_rel_mom should exist."""
+        features = compute_alpha_features(sample_prices)
+        features = compute_cross_sectional_features(features)
+        assert "sector_rel_mom" in features.columns

@@ -291,6 +291,18 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     # Open-close range
     df["oc_range"] = np.where(c != 0, (c - o) / c, 0.0)
 
+    # Momentum 12-1: 12-month return excluding last month (Jegadeesh & Titman)
+    # The most documented equity anomaly — excludes the short-term reversal month
+    ret_12m = c.pct_change(252)  # ~12 months of trading days
+    ret_1m = c.pct_change(21)  # ~1 month
+    df["mom_12_1"] = ret_12m - ret_1m
+
+    # Mean-reversion z-score: (price - 60d MA) / 60d std
+    # Identifies overbought/oversold conditions
+    ma_60 = c.rolling(60).mean()
+    std_60 = c.rolling(60).std()
+    df["mr_zscore_60"] = np.where(std_60 > 0, (c - ma_60) / std_60, 0.0)
+
     # C11 fix: scrub any inf/-inf that slipped through division or log
     df = _scrub_infinities(df)
 
@@ -348,6 +360,22 @@ def compute_cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
             df[new_col] = df.groupby(level=0)[src_col].rank(
                 pct=True, method="average", na_option="keep"
             )
+
+    # Sector-relative momentum: stock's return minus sector average return
+    # Isolates stock-specific momentum from sector rotation effects
+    if "ret_20d" in df.columns and "ticker" in df.columns:
+        try:
+            from python.data.sectors import get_sector
+
+            df["_sector"] = df["ticker"].map(get_sector)
+            sector_mean = df.groupby([df.index.get_level_values(0), "_sector"])[
+                "ret_20d"
+            ].transform("mean")
+            df["sector_rel_mom"] = df["ret_20d"] - sector_mean
+            df.drop(columns=["_sector"], inplace=True)
+        except Exception as exc:
+            logger.warning(f"Could not compute sector-relative momentum: {exc}")
+
     # C11 fix: scrub any inf that may leak from upstream computations
     df = _scrub_infinities(df)
     return df

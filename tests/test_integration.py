@@ -20,12 +20,17 @@ from python.portfolio.risk import RiskEngine
 
 @pytest.fixture
 def synthetic_universe():
-    """Generate a synthetic 10-stock universe with realistic-ish prices."""
+    """Generate a synthetic 10-stock universe with realistic-ish prices.
+
+    Uses 500 business days so momentum 12-1 feature (needs 252+21 days
+    of history) has valid values in the latter portion of the dataset.
+    """
     np.random.seed(42)
-    dates = pd.date_range("2023-01-01", periods=252, freq="B")
+    n_days = 500
+    dates = pd.date_range("2022-01-01", periods=n_days, freq="B")
     tickers = [f"STOCK_{i}" for i in range(10)]
     prices = pd.DataFrame(
-        np.exp(np.cumsum(np.random.randn(252, 10) * 0.015, axis=0)) * 100,
+        np.exp(np.cumsum(np.random.randn(n_days, 10) * 0.015, axis=0)) * 100,
         index=dates,
         columns=tickers,
     )
@@ -35,11 +40,11 @@ def synthetic_universe():
             pd.DataFrame(
                 {
                     "ticker": ticker,
-                    "open": prices[ticker] * (1 + np.random.randn(252) * 0.005),
-                    "high": prices[ticker] * (1 + abs(np.random.randn(252)) * 0.01),
-                    "low": prices[ticker] * (1 - abs(np.random.randn(252)) * 0.01),
+                    "open": prices[ticker] * (1 + np.random.randn(n_days) * 0.005),
+                    "high": prices[ticker] * (1 + abs(np.random.randn(n_days)) * 0.01),
+                    "low": prices[ticker] * (1 - abs(np.random.randn(n_days)) * 0.01),
                     "close": prices[ticker],
-                    "volume": np.random.randint(100000, 1000000, 252).astype(float),
+                    "volume": np.random.randint(100000, 1000000, n_days).astype(float),
                 },
                 index=dates,
             )

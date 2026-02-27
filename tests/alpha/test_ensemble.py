@@ -281,7 +281,7 @@ class TestFeatureReduction:
     def test_reduced_feature_set_size(self):
         from python.alpha.train import FEATURE_COLS
 
-        assert len(FEATURE_COLS) == 7
+        assert len(FEATURE_COLS) == 10
 
     def test_reduced_feature_set_contents(self):
         from python.alpha.train import FEATURE_COLS
@@ -289,18 +289,21 @@ class TestFeatureReduction:
         expected = {
             "ret_5d",
             "ret_20d",
+            "mom_12_1",
             "rsi_14",
             "bb_position",
+            "mr_zscore_60",
             "vol_20d",
             "volume_ratio",
             "cs_ret_rank_5d",
+            "sector_rel_mom",
         }
         assert set(FEATURE_COLS) == expected
 
     def test_full_feature_set_preserved(self):
         from python.alpha.train import FEATURE_COLS_FULL
 
-        assert len(FEATURE_COLS_FULL) == 26
+        assert len(FEATURE_COLS_FULL) == 29
 
     def test_reduced_is_subset_of_full(self):
         from python.alpha.train import FEATURE_COLS, FEATURE_COLS_FULL
