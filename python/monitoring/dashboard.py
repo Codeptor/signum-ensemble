@@ -1449,7 +1449,15 @@ def _json_response(data: dict, status: int = 200) -> Response:
     """Return a JSON response with CORS headers for broad access."""
     resp = jsonify(data)
     resp.status_code = status
-    resp.headers["Access-Control-Allow-Origin"] = "*"
+    # Restrict CORS to localhost and the dashboard domain (not wildcard)
+    from flask import request as _req
+
+    origin = _req.headers.get("Origin", "")
+    allowed = {"http://localhost:8050", "https://dashboard.bhanueso.dev"}
+    if origin in allowed:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+    else:
+        resp.headers["Access-Control-Allow-Origin"] = "https://dashboard.bhanueso.dev"
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
@@ -1669,7 +1677,10 @@ def register_api_routes(app: dash.Dash) -> None:
     def api_logs():
         from flask import request
 
-        n_lines = min(int(request.args.get("lines", 80)), 500)
+        try:
+            n_lines = min(int(request.args.get("lines", 80)), 500)
+        except (ValueError, TypeError):
+            n_lines = 80
         log_text = _read_log_tail(n_lines)
         lines = log_text.splitlines()
         return _json_response(
