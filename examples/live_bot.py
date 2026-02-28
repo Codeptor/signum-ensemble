@@ -120,10 +120,10 @@ MAX_DRAWDOWN_LIMIT = _env_float("MAX_DRAWDOWN_LIMIT", 0.15)
 # stopping out positions before the 5-day prediction horizon plays out.
 # 3x ATR SL / 5x ATR TP gives ~3:5 risk/reward and fewer whipsaws.
 # Fixed fallback percentages apply when ATR is unavailable.
-STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.07)
-TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.20)
-ATR_SL_MULTIPLIER = _env_float("ATR_SL_MULTIPLIER", 3.0)
-ATR_TP_MULTIPLIER = _env_float("ATR_TP_MULTIPLIER", 5.0)
+STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.05)
+TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.15)
+ATR_SL_MULTIPLIER = _env_float("ATR_SL_MULTIPLIER", 2.0)
+ATR_TP_MULTIPLIER = _env_float("ATR_TP_MULTIPLIER", 3.0)
 SLEEP_AFTER_TRADE_HOURS = _env_int("SLEEP_AFTER_TRADE_HOURS", 12)
 SLEEP_MARKET_CLOSED_HOURS = _env_int("SLEEP_MARKET_CLOSED_HOURS", 1)
 ORDER_POLL_INTERVAL_SECS = _env_int("ORDER_POLL_INTERVAL_SECS", 2)
