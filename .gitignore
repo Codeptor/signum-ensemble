@@ -37,6 +37,9 @@ docs/plans/
 deploy/signum_ed25519
 deploy/signum_ed25519.pub
 
+# Agent instruction files (keep local)
+CLAUDE.md
+
 # Session artifacts
 session-*.md
 signum
