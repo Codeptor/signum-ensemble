@@ -1421,9 +1421,15 @@ def main():
                             f"VaR={v.metric_value:.2%}, limit={v.limit_value:.2%}",
                             AlertSeverity.CRITICAL,
                         )
+                        var_prices = {
+                            p.symbol: p.current_price for p in positions if p.current_price > 0
+                        }
                         bridge.reconcile_target_weights(
                             target_weights=scaled.to_dict(),
-                            broker=broker,
+                            prices=var_prices,
+                            current_date=datetime.now(tz=ZoneInfo("America/New_York")).strftime(
+                                "%Y-%m-%d"
+                            ),
                         )
                     else:
                         logger.warning(
