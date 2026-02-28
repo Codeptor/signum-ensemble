@@ -55,7 +55,7 @@ export async function GET(
     const message =
       error instanceof Error ? error.message : "Failed to reach bot";
     return NextResponse.json(
-      { error: message, bot, endpoint },
+      { error: message, bot, endpoint, url },
       { status: 502 }
     );
   }
