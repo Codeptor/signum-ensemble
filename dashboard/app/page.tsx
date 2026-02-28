@@ -147,11 +147,7 @@ export default function DashboardPage() {
     setTca(t);
     setDrift(d);
     setEquity(Array.isArray(e) ? e : []);
-    if (l) {
-      setLogs(typeof l === "string" ? l : (l as { logs: string }).logs || "");
-    } else {
-      setLogs("");
-    }
+    setLogs(l);
     setHealthy(h != null);
     setLoading(false);
     setLastRefresh(new Date());

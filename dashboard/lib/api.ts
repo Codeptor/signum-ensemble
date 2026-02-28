@@ -42,6 +42,11 @@ export async function fetchHealth(bot: BotId) {
   return fetchBot<HealthData>(bot, "healthz");
 }
 
-export async function fetchLogs(bot: BotId, lines = 50) {
-  return fetchBot<{ logs: string } | string>(bot, `api/logs?lines=${lines}`);
+export async function fetchLogs(bot: BotId, lines = 50): Promise<string> {
+  const data = await fetchBot<{ log: string[]; logs: string } | string>(bot, `api/logs?lines=${lines}`);
+  if (!data) return "";
+  if (typeof data === "string") return data;
+  if (Array.isArray(data.log)) return data.log.join("\n");
+  if (data.logs) return data.logs;
+  return "";
 }
