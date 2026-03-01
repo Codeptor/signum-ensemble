@@ -48,6 +48,22 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { Area, AreaChart, XAxis, YAxis } from "recharts";
+import { SparklesIcon } from "@/components/ui/sparkles";
+import { ClockIcon } from "@/components/ui/clock";
+import { RefreshCWIcon } from "@/components/ui/refresh-cw";
+import { PauseIcon } from "@/components/ui/pause";
+import { BotIcon } from "@/components/ui/bot";
+import { DollarSignIcon } from "@/components/ui/dollar-sign";
+import { GaugeIcon } from "@/components/ui/gauge";
+import { ActivityIcon } from "@/components/ui/activity";
+import { ChartLineIcon } from "@/components/ui/chart-line";
+import { ShieldCheckIcon } from "@/components/ui/shield-check";
+import { ChartBarIncreasingIcon } from "@/components/ui/chart-bar-increasing";
+import { LayersIcon } from "@/components/ui/layers";
+import { TerminalIcon } from "@/components/ui/terminal";
+import { WavesIcon } from "@/components/ui/waves";
+import { TrendingUpIcon } from "@/components/ui/trending-up";
+import { TrendingDownIcon } from "@/components/ui/trending-down";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -440,7 +456,10 @@ export default function DashboardPage() {
       <header className="border-b border-border px-6 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <h1 className="text-sm font-semibold tracking-tight">SIGNUM</h1>
+            <div className="flex items-center gap-1.5">
+              <SparklesIcon size={14} />
+              <h1 className="text-sm font-semibold tracking-tight">SIGNUM</h1>
+            </div>
             <Separator orientation="vertical" className="h-4" />
             <Badge
               variant={
@@ -467,14 +486,16 @@ export default function DashboardPage() {
             </Tabs>
             <Separator orientation="vertical" className="h-4" />
             <div className="flex items-center gap-3 text-[10px] tabular-nums text-muted-foreground">
+              <ClockIcon size={12} />
               <span>{fmtTz(now, "America/New_York", "NY")}</span>
               <span>{fmtTz(now, "Asia/Kolkata", "IST")}</span>
               <span>{fmtTz(now, "UTC", "UTC")}</span>
             </div>
             <Separator orientation="vertical" className="h-4" />
-            <span className="text-[10px] tabular-nums text-muted-foreground">
-              {refreshIn}s
-            </span>
+            <div className="flex items-center gap-1 text-[10px] tabular-nums text-muted-foreground">
+              {paused ? <PauseIcon size={12} /> : <RefreshCWIcon size={12} />}
+              <span>{paused ? "paused" : `${refreshIn}s`}</span>
+            </div>
           </div>
         </div>
       </header>
@@ -526,7 +547,10 @@ export default function DashboardPage() {
           <div className="grid grid-cols-4 gap-4">
             <Card className="col-span-2">
               <CardHeader>
-                <CardDescription>Portfolio Equity</CardDescription>
+                <CardDescription className="flex items-center gap-1.5">
+                  <DollarSignIcon size={14} />
+                  Portfolio Equity
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="flex items-baseline justify-between">
@@ -543,7 +567,10 @@ export default function DashboardPage() {
 
             <Card>
               <CardHeader>
-                <CardDescription>Market Regime</CardDescription>
+                <CardDescription className="flex items-center gap-1.5">
+                  <GaugeIcon size={14} />
+                  Market Regime
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2">
@@ -570,7 +597,10 @@ export default function DashboardPage() {
 
             <Card>
               <CardHeader>
-                <CardDescription>Bot State</CardDescription>
+                <CardDescription className="flex items-center gap-1.5">
+                  <ActivityIcon size={14} />
+                  Bot State
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2">
@@ -601,13 +631,17 @@ export default function DashboardPage() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle>Equity Curve</CardTitle>
+                  <CardTitle className="flex items-center gap-1.5">
+                    <ChartLineIcon size={16} />
+                    Equity Curve
+                  </CardTitle>
                   <CardDescription>
                     Bot A vs Bot B — portfolio value over time
                   </CardDescription>
                 </div>
                 {paused && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="flex items-center gap-1 text-[10px]">
+                    <PauseIcon size={10} />
                     PAUSED
                   </Badge>
                 )}
@@ -626,7 +660,10 @@ export default function DashboardPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Risk Metrics</CardTitle>
+              <CardTitle className="flex items-center gap-1.5">
+                <ShieldCheckIcon size={16} />
+                Risk Metrics
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <dl className="space-y-3 text-xs">
@@ -662,7 +699,10 @@ export default function DashboardPage() {
         {positions.length > 0 && (
           <Card>
             <CardHeader>
-              <CardTitle>Sector Exposure</CardTitle>
+              <CardTitle className="flex items-center gap-1.5">
+                <ChartBarIncreasingIcon size={16} />
+                Sector Exposure
+              </CardTitle>
               <CardDescription>Portfolio weight by sector</CardDescription>
             </CardHeader>
             <CardContent>
@@ -674,7 +714,10 @@ export default function DashboardPage() {
         {/* ── Positions Table ──────────────────────────────────── */}
         <Card>
           <CardHeader>
-            <CardTitle>Open Positions</CardTitle>
+            <CardTitle className="flex items-center gap-1.5">
+              <LayersIcon size={16} />
+              Open Positions
+            </CardTitle>
             <CardDescription>
               {positions.length} position{positions.length !== 1 ? "s" : ""}
             </CardDescription>
@@ -779,7 +822,10 @@ export default function DashboardPage() {
         <div className="grid grid-cols-4 gap-4">
           <Card className="col-span-2">
             <CardHeader>
-              <CardTitle>Logs</CardTitle>
+              <CardTitle className="flex items-center gap-1.5">
+                <TerminalIcon size={16} />
+                Logs
+              </CardTitle>
               <CardDescription>Recent bot output</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
@@ -793,7 +839,10 @@ export default function DashboardPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>TCA</CardTitle>
+              <CardTitle className="flex items-center gap-1.5">
+                <DollarSignIcon size={16} />
+                TCA
+              </CardTitle>
               <CardDescription>Transaction cost analysis</CardDescription>
             </CardHeader>
             <CardContent>
@@ -816,7 +865,10 @@ export default function DashboardPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Feature Drift</CardTitle>
+              <CardTitle className="flex items-center gap-1.5">
+                <WavesIcon size={16} />
+                Feature Drift
+              </CardTitle>
               <CardDescription>KS test + PSI monitoring</CardDescription>
             </CardHeader>
             <CardContent>
@@ -890,6 +942,7 @@ function ComparisonCard({
                     : "bg-muted"
               }`}
             />
+            <BotIcon size={16} />
             <CardTitle>{label}</CardTitle>
             <Badge variant="outline" className="text-[10px]">
               {sublabel}
@@ -919,12 +972,16 @@ function ComparisonCard({
               </p>
               {status?.account?.equity != null && (
                 <span
-                  className={`text-xs font-medium tabular-nums ${
+                  className={`flex items-center gap-1 text-xs font-medium tabular-nums ${
                     status.account.equity >= STARTING_EQUITY
                       ? "text-green-500"
                       : "text-red-500"
                   }`}
                 >
+                  {status.account.equity >= STARTING_EQUITY
+                    ? <TrendingUpIcon size={12} />
+                    : <TrendingDownIcon size={12} />
+                  }
                   {status.account.equity >= STARTING_EQUITY ? "+" : ""}
                   {fmtUsd(status.account.equity - STARTING_EQUITY)} (
                   {status.account.equity >= STARTING_EQUITY ? "+" : ""}
