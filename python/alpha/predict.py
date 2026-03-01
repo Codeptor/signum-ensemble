@@ -708,7 +708,9 @@ def rank_stocks(
         # Scale down: e.g. if median = -0.01 and 75th pctl = 0.005,
         # only keep stocks with clearly positive predicted residual.
         n_positive = int((score_series > 0).sum())
-        effective_n = max(1, min(top_n, n_positive))
+        # P1-9 fix: minimum portfolio of 3 stocks for diversification.
+        # A single-stock portfolio has catastrophic idiosyncratic risk.
+        effective_n = max(3, min(top_n, n_positive))
         if effective_n < top_n:
             logger.warning(
                 f"H-SIGNAL: median prediction={median_score:.4f} < 0, "
@@ -771,9 +773,14 @@ def apply_confidence_sizing(
     if score_range < 1e-12:
         return weights  # All scores identical — no reweighting
 
-    normalized = {t: (s - min_score) / score_range for t, s in scores.items()}
+    # P1-18 fix: map to [0.5, 1.5] instead of [0, 1].  The old [0, 1]
+    # normalization mapped the lowest-scored stock to *zero* conviction
+    # weight, effectively removing it from the portfolio even though the
+    # optimizer selected it.  The [0.5, 1.5] range keeps every stock at
+    # at least 50% of its base weight while still tilting toward conviction.
+    normalized = {t: 0.5 + (s - min_score) / score_range for t, s in scores.items()}
 
-    # Convert to conviction weights (softmax-like)
+    # Convert to conviction weights (proportional to normalized scores)
     total_norm = sum(normalized.values()) or 1.0
     conviction_weights = {t: s / total_norm for t, s in normalized.items()}
 

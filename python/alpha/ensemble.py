@@ -37,7 +37,14 @@ def _safe_ic(pred: np.ndarray, actual: np.ndarray) -> float:
     """Compute rank Information Coefficient with NaN/zero-variance guard.
 
     Uses Spearman rank correlation (standard for cross-sectional equity models).
-    Returns 0.0 for degenerate inputs (NaN, zero variance, negative IC).
+    Returns 0.0 for degenerate inputs (NaN, zero variance).
+
+    P1-17 fix: negative IC is preserved instead of being clamped to 0.
+    A negative IC means the model has predictive power but with inverted
+    sign — the IC-weighting logic in the ensemble uses abs(IC) for weight
+    magnitude and the sign to decide whether to flip predictions.  Clamping
+    negative IC to 0 discarded useful signal and gave equal weight to
+    genuinely uninformative models (IC ≈ 0) and inversely predictive ones.
     """
     from scipy.stats import spearmanr
 
@@ -47,7 +54,7 @@ def _safe_ic(pred: np.ndarray, actual: np.ndarray) -> float:
         return 0.0
     ic, _ = spearmanr(pred, actual)
     ic = float(ic)
-    return 0.0 if (np.isnan(ic) or ic < 0) else ic
+    return 0.0 if np.isnan(ic) else ic
 
 
 # Default ensemble weights (prior to IC-based calibration / stacking)
@@ -93,6 +100,10 @@ class ModelEnsemble:
             model_type="lightgbm",
             feature_cols=feature_cols,
         )
+        # P1-16 fix: use Huber loss instead of RMSE for consistency with
+        # the LightGBM sub-model (which uses Huber).  RMSE is sensitive to
+        # return outliers (earnings gaps, halts) — Huber's bounded gradient
+        # prevents single observations from dominating the ensemble.
         self.catboost = CatBoostRegressor(
             iterations=500,
             depth=6,
@@ -100,7 +111,7 @@ class ModelEnsemble:
             l2_leaf_reg=3.0,
             random_seed=DEFAULT_SEED,
             verbose=0,
-            loss_function="RMSE",
+            loss_function="Huber:delta=1.0",
         )
         self.rf = RandomForestRegressor(
             n_estimators=100,
@@ -177,8 +188,7 @@ class ModelEnsemble:
             d2 = val_dates[2 * n_val_dates // 3]
             early_stop_df = val_df.loc[val_df.index.get_level_values(0) < d1]
             oos_df = val_df.loc[
-                (val_df.index.get_level_values(0) >= d1)
-                & (val_df.index.get_level_values(0) < d2)
+                (val_df.index.get_level_values(0) >= d1) & (val_df.index.get_level_values(0) < d2)
             ]
             ic_cal_df = val_df.loc[val_df.index.get_level_values(0) >= d2]
             logger.info(
@@ -246,11 +256,13 @@ class ModelEnsemble:
         X_clean = X_oos[mask]
 
         # Collect OOS predictions from each base model
-        base_preds = np.column_stack([
-            self.lgbm.predict(oos_clean),
-            self.catboost.predict(X_clean),
-            self.rf.predict(X_clean),
-        ])
+        base_preds = np.column_stack(
+            [
+                self.lgbm.predict(oos_clean),
+                self.catboost.predict(X_clean),
+                self.rf.predict(X_clean),
+            ]
+        )
 
         self.meta_learner = Ridge(alpha=1.0)
         self.meta_learner.fit(base_preds, y_clean)
@@ -263,11 +275,13 @@ class ModelEnsemble:
                 eval_clean = ic_eval_df.iloc[eval_mask.nonzero()[0]]
                 y_eval_clean = y_eval[eval_mask]
                 X_eval_clean = X_eval[eval_mask]
-                eval_base_preds = np.column_stack([
-                    self.lgbm.predict(eval_clean),
-                    self.catboost.predict(X_eval_clean),
-                    self.rf.predict(X_eval_clean),
-                ])
+                eval_base_preds = np.column_stack(
+                    [
+                        self.lgbm.predict(eval_clean),
+                        self.catboost.predict(X_eval_clean),
+                        self.rf.predict(X_eval_clean),
+                    ]
+                )
                 eval_meta_pred = self.meta_learner.predict(eval_base_preds)
                 stacking_ic = _safe_ic(eval_meta_pred, y_eval_clean)
 
@@ -300,17 +314,17 @@ class ModelEnsemble:
 
         if self.meta_learner is not None:
             # Stacking: Ridge meta-learner over base predictions
-            stacked = np.column_stack([
-                base_preds["lightgbm"],
-                base_preds["catboost"],
-                base_preds["random_forest"],
-            ])
+            stacked = np.column_stack(
+                [
+                    base_preds["lightgbm"],
+                    base_preds["catboost"],
+                    base_preds["random_forest"],
+                ]
+            )
             return self.meta_learner.predict(stacked)
         else:
             # Fallback: IC-weighted average
-            ensemble_pred = sum(
-                base_preds[name] * weight for name, weight in self.weights.items()
-            )
+            ensemble_pred = sum(base_preds[name] * weight for name, weight in self.weights.items())
             return np.asarray(ensemble_pred, dtype=np.float64)
 
     def predict_individual(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
@@ -376,9 +390,7 @@ class ModelEnsemble:
 
         # LightGBM
         if self.lgbm.model is not None:
-            result["lightgbm"] = (
-                self.lgbm.feature_importance().reindex(self.feature_cols).values
-            )
+            result["lightgbm"] = self.lgbm.feature_importance().reindex(self.feature_cols).values
 
         # CatBoost
         if hasattr(self.catboost, "feature_importances_"):
