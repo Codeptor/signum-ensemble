@@ -631,10 +631,13 @@ class TestPositions:
         assert len(positions) == 2
         assert all(isinstance(p, BrokerPosition) for p in positions)
 
-    def test_list_positions_failure_returns_empty(self, broker):
+    def test_list_positions_failure_raises(self, broker):
+        """P0-2 fix: list_positions must raise on API failure, never
+        silently return [] — that would cause phantom double-buys."""
         b, mock_rest = broker
         mock_rest.list_positions.side_effect = Exception("timeout")
-        assert b.list_positions() == []
+        with pytest.raises(Exception, match="timeout"):
+            b.list_positions()
 
 
 # ===========================================================================

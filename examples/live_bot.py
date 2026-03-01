@@ -194,7 +194,14 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
             if attempt < 2:
                 time.sleep(1)
 
-    positions = broker.list_positions()
+    try:
+        positions = broker.list_positions()
+    except Exception as e:
+        logger.error(
+            f"CRITICAL: Cannot list positions during liquidation: {e}. "
+            f"Orders already cancelled. Manual intervention required."
+        )
+        return 0
     if not positions:
         logger.info("No positions to liquidate.")
         return 0
@@ -813,12 +820,24 @@ def run_trading_cycle(
     # R3-E-1 fix: reset ALL bridge positions before syncing from broker.
     # Without this, positions closed via SL/TP between cycles remain as
     # ghost entries in the bridge, causing spurious sell orders.
+    #
+    # P0-2 fix: list_positions() now raises on API failure instead of
+    # returning []. We must fetch positions BEFORE resetting the bridge —
+    # if the fetch fails, we abort without corrupting bridge state.
+    try:
+        current_positions = broker.list_positions()
+    except Exception as e:
+        logger.error(
+            f"CRITICAL: Cannot fetch positions from broker: {e}. "
+            f"Aborting cycle to prevent phantom double-buys."
+        )
+        return False
+
     for ticker in list(bridge.positions.keys()):
         bridge.positions[ticker].quantity = 0.0
         bridge.positions[ticker].avg_cost = 0.0
 
     # Sync current positions from broker into the bridge
-    current_positions = broker.list_positions()
     for pos in current_positions:
         bridge_pos = bridge.get_position(pos.symbol)
         bridge_pos.quantity = pos.qty
@@ -1368,7 +1387,11 @@ def main():
 
                 # R3-E-3 fix: sync risk_manager.current_weights from broker
                 # so trade-size, leverage, and sector checks use actual positions
-                positions = broker.list_positions()
+                try:
+                    positions = broker.list_positions()
+                except Exception as e:
+                    logger.warning(f"Could not fetch positions for risk sync: {e}")
+                    positions = []
                 account = broker.get_account()
                 if positions and account.equity > 0:
                     risk_manager.current_weights = pd.Series(

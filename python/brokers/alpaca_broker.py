@@ -375,8 +375,12 @@ class AlpacaBroker(BaseBroker):
                 for p in positions
             ]
         except Exception as e:
+            # P0-2 fix: never silently return [] on API failure.
+            # Returning [] when the broker actually holds positions causes
+            # the bridge sync to think everything is closed, leading to
+            # phantom double-buys that can 2x portfolio exposure.
             logger.error(f"Failed to list positions: {e}")
-            return []
+            raise
 
     @_retry_read
     def get_latest_price(self, symbol: str) -> float:
