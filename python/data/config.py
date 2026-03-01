@@ -1,8 +1,15 @@
+import os
 from pathlib import Path
 
 DATA_DIR = Path("data")
 RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
+
+# --- Tiingo API (fallback for delisted/acquired ticker data) ---
+# Free tier: 500 API calls/day, covers delisted equities.
+# Register at https://api.tiingo.com to get a token.
+TIINGO_API_TOKEN = os.getenv("TIINGO_API_TOKEN", "")
+DELISTED_CACHE_DIR = DATA_DIR / "cache" / "delisted"
 
 SP500_UNIVERSE = "sp500"
 DEFAULT_PERIOD = "5y"

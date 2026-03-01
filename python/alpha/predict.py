@@ -519,20 +519,45 @@ def train_model(
         logger.info("No cached data found, fetching S&P 500 history for training...")
         from python.data.ingestion import fetch_sp500_tickers
 
-        # H10 warning: survivorship bias — current S&P 500 list is used to
-        # fetch historical data.  Companies removed from the index (bankruptcy,
-        # delisting, M&A) before today are excluded, which inflates apparent
-        # model performance.  For paper trading this is acceptable; any backtest
-        # should use a point-in-time membership table instead.
-        logger.warning(
-            "SURVIVORSHIP BIAS: training on *current* S&P 500 constituents. "
-            "Delisted/removed companies are excluded from history. "
-            "Use a point-in-time membership table for unbiased backtests."
-        )
-
         all_tickers = fetch_sp500_tickers()
         tickers = training_tickers or all_tickers
-        raw = fetch_ohlcv(tickers, period=TRAINING_LOOKBACK)
+
+        # --- Survivorship-bias fix ---
+        # Use point-in-time universe to include tickers that were in the
+        # S&P 500 during the training window but have since been removed
+        # (acquisitions, delistings, bankruptcies).  Without this, the
+        # model trains only on survivors, inflating apparent performance.
+        historical_removals: list[str] = []
+        try:
+            from datetime import date as _date, timedelta as _td
+
+            from python.data.universe import SurvivalUniverseProvider
+
+            provider = SurvivalUniverseProvider()
+            # Get tickers from 2 years ago that aren't in today's list
+            lookback_start = _date.today() - _td(days=365 * 2)
+            historical_universe = provider.get_universe(lookback_start)
+            historical_removals = sorted(set(historical_universe) - set(tickers))
+            if historical_removals:
+                logger.info(
+                    f"Point-in-time universe: {len(historical_removals)} tickers "
+                    f"removed from S&P 500 since {lookback_start}: "
+                    f"{historical_removals[:20]}{'...' if len(historical_removals) > 20 else ''}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not load point-in-time universe (non-fatal): {e}")
+
+        if historical_removals:
+            from python.data.ingestion import fetch_ohlcv_with_delisted
+
+            raw = fetch_ohlcv_with_delisted(
+                current_tickers=tickers,
+                historical_tickers=historical_removals,
+                period=TRAINING_LOOKBACK,
+            )
+        else:
+            raw = fetch_ohlcv(tickers, period=TRAINING_LOOKBACK)
+
         long = reshape_ohlcv_wide_to_long(raw)
 
     # Compute features and targets

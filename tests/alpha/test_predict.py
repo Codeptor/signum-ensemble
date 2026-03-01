@@ -416,15 +416,18 @@ class TestRandomSampleTraining:
         assert sample != tickers[:100]
 
 
-class TestSurvivorshipBiasWarning:
-    """H10: train_model logs a survivorship bias warning when fetching live data."""
+class TestSurvivorshipBiasFix:
+    """H10 / H-SURV: train_model uses SurvivalUniverseProvider to fetch
+    point-in-time universe, eliminating survivorship bias instead of
+    just logging a warning."""
 
-    def test_warning_logged_when_fetching(self, monkeypatch, caplog):
-        """When no cached data exists, a survivorship bias warning is emitted.
+    def test_survivorship_fix_triggered_when_fetching(self, monkeypatch, caplog):
+        """When no cached data exists and the universe provider finds removals,
+        the survivorship-bias fix code path should be triggered, calling
+        fetch_ohlcv_with_delisted instead of plain fetch_ohlcv.
 
-        We short-circuit training after verifying the warning appears by
-        raising an exception in fetch_ohlcv — the warning is issued before
-        the fetch call, so this is sufficient.
+        We short-circuit training after the data-fetch step by raising
+        an exception in fetch_ohlcv_with_delisted.
         """
         import logging
         from pathlib import Path
@@ -448,23 +451,36 @@ class TestSurvivorshipBiasWarning:
         monkeypatch.setattr(predict_mod, "Path", _fake_path)
 
         # Mock ticker source
+        current_tickers = [f"T{i}" for i in range(200)]
         monkeypatch.setattr(
             "python.data.ingestion.fetch_sp500_tickers",
-            lambda: [f"T{i}" for i in range(200)],
+            lambda: current_tickers,
         )
 
-        # Short-circuit: raise after the survivorship warning is already logged
+        # Mock SurvivalUniverseProvider to return extra (removed) tickers
+        class MockProvider:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_universe(self, as_of):
+                return current_tickers + ["TWTR", "ATVI"]
+
+        monkeypatch.setattr("python.data.universe.SurvivalUniverseProvider", MockProvider)
+
+        # Short-circuit: raise after the survivorship fix is triggered
         class _StopEarlyError(Exception):
             pass
 
         monkeypatch.setattr(
-            predict_mod, "fetch_ohlcv", lambda *a, **kw: (_ for _ in ()).throw(_StopEarlyError)
+            "python.data.ingestion.fetch_ohlcv_with_delisted",
+            lambda **kw: (_ for _ in ()).throw(_StopEarlyError),
         )
 
-        with caplog.at_level(logging.WARNING, logger="python.alpha.predict"):
+        with caplog.at_level(logging.INFO, logger="python.alpha.predict"):
             with pytest.raises(_StopEarlyError):
                 predict_mod.train_model(force_retrain=True)
 
-        assert any("SURVIVORSHIP BIAS" in rec.message for rec in caplog.records), (
-            "Expected survivorship bias warning in logs"
+        # The point-in-time universe log message should appear
+        assert any("Point-in-time universe" in rec.message for rec in caplog.records), (
+            "Expected point-in-time universe info log when removals are found"
         )

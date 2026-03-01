@@ -13,7 +13,7 @@ Signum is an automated quantitative equity trading bot. It trains a **LightGBM +
 
 - **Use `uv run` for everything** — `uv run python -m pytest tests/ -x -q --tb=short`, never raw `python` or `pip`
 - **Use `pnpm` for the dashboard** — `pnpm dev`, `pnpm build`, never npm/yarn
-- **Test command:** `uv run python -m pytest tests/ -x -q --tb=short` — must pass **1443+ tests**
+- **Test command:** `uv run python -m pytest tests/ -x -q --tb=short` — must pass **1477+ tests**
 - **Never commit secrets** — `.env`, API keys, SSH keys (`deploy/signum_ed25519`) are gitignored
 - **The bot defaults to paper trading.** Only `LIVE_TRADING=true` env var activates real money. Do not set this.
 - **LSP errors** about unresolved imports (numpy, pandas, pytest, etc.) are pre-existing venv-path issues — **ignore them**
@@ -25,7 +25,8 @@ Signum is an automated quantitative equity trading bot. It trains a **LightGBM +
 ```
 examples/live_bot.py          Entry point — runs weekly on Wednesdays
     │
-    ├── python/data/ingestion.py       Scrape S&P 500 tickers, fetch 2yr OHLCV
+    ├── python/data/ingestion.py       Scrape S&P 500 tickers, fetch 2yr OHLCV + Tiingo fallback for delisted
+    ├── python/data/universe.py        Point-in-time S&P 500 membership (survivorship-bias-free)
     ├── python/alpha/features.py       27 computed features (11 active in reduced set) + winsorization + volatility estimators
     ├── python/alpha/model.py          LightGBM (Huber loss) wrapper
     ├── python/alpha/ensemble.py       LightGBM + CatBoost + RF + Ridge stacking meta-learner
@@ -133,7 +134,7 @@ The Next.js dashboard provides **real-time A/B comparison** of Bot A vs Bot B du
 | Tracking | None | MLflow experiment tracking |
 | TCA | None | Implementation shortfall in bps per trade |
 | Dashboard | None | Next.js A/B comparison dashboard on Vercel |
-| Tests | 594 | 1443+ |
+| Tests | 594 | 1477+ |
 
 ## Key Technical Decisions
 
@@ -180,7 +181,7 @@ The Next.js dashboard provides **real-time A/B comparison** of Bot A vs Bot B du
 ## Running Tests
 
 ```bash
-# Full suite (should pass 1443+ tests in ~140s)
+# Full suite (should pass 1477+ tests in ~140s)
 uv run python -m pytest tests/ -x -q --tb=short
 
 # Specific modules
@@ -224,7 +225,6 @@ These 24+ modules exist for research and backtesting only. They do NOT import in
 
 ## Known Limitations (documented, not fixing)
 
-- **Survivorship bias:** Uses current S&P 500 list for historical data
 - **`alpaca-trade-api` deprecated:** Works fine but Alpaca recommends migration to `alpaca-py`
 - **`rolling_beta` crash:** Only called from dashboard, never from live bot
 - **HMM re-downloads SPY 3mo each cycle:** Acceptable for weekly rebalancing frequency

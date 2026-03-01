@@ -236,6 +236,226 @@ def fetch_ohlcv(
     return df
 
 
+def fetch_tiingo_ohlcv(
+    tickers: list[str],
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Fetch OHLCV from Tiingo for tickers yfinance can't resolve (delisted/acquired).
+
+    Tiingo retains data for 65K+ tickers including delisted equities.
+    Free tier: 500 API calls/day — sufficient for ~50-100 delisted tickers.
+
+    Returns data in the same MultiIndex format as fetch_ohlcv() so downstream
+    code (reshape_ohlcv_wide_to_long, etc.) works without changes.
+
+    Args:
+        tickers: List of ticker symbols to fetch.
+        start_date: Start date as "YYYY-MM-DD".
+        end_date: End date as "YYYY-MM-DD".
+
+    Returns:
+        DataFrame with MultiIndex columns (ticker, OHLCV field) matching
+        the yfinance output format. Empty DataFrame if no data or no API token.
+    """
+    import urllib.error
+    import urllib.request
+
+    from python.data.config import DELISTED_CACHE_DIR, TIINGO_API_TOKEN
+
+    if not TIINGO_API_TOKEN:
+        logger.warning("TIINGO_API_TOKEN not set — cannot fetch delisted ticker data")
+        return pd.DataFrame()
+
+    if not tickers:
+        return pd.DataFrame()
+
+    DELISTED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    frames = {}
+    fetched = 0
+    cached = 0
+
+    for ticker in tickers:
+        # Check local cache first (delisted data never changes)
+        cache_path = DELISTED_CACHE_DIR / f"{ticker}.parquet"
+        if cache_path.exists():
+            try:
+                df_cached = pd.read_parquet(cache_path)
+                # Filter to requested date range
+                mask = (df_cached.index >= start_date) & (df_cached.index <= end_date)
+                df_filtered = df_cached.loc[mask]
+                if not df_filtered.empty:
+                    frames[ticker] = df_filtered
+                    cached += 1
+                    continue
+            except Exception:
+                pass  # Re-fetch on cache corruption
+
+        # Fetch from Tiingo API
+        url = (
+            f"https://api.tiingo.com/tiingo/daily/{ticker}/prices"
+            f"?startDate={start_date}&endDate={end_date}"
+            f"&token={TIINGO_API_TOKEN}"
+        )
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "signum-quant/0.1",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                import json as _json
+
+                data = _json.loads(resp.read().decode("utf-8"))
+
+            if not data:
+                logger.debug(f"Tiingo: no data for {ticker}")
+                continue
+
+            df_ticker = pd.DataFrame(data)
+            df_ticker["date"] = pd.to_datetime(df_ticker["date"]).dt.tz_localize(None)
+            df_ticker = df_ticker.set_index("date")
+
+            # Map Tiingo columns to yfinance column names
+            col_map = {
+                "adjOpen": "Open",
+                "adjHigh": "High",
+                "adjLow": "Low",
+                "adjClose": "Close",
+                "adjVolume": "Volume",
+            }
+            df_mapped = df_ticker.rename(columns=col_map)[list(col_map.values())]
+            df_mapped = df_mapped.dropna(subset=["Close"])
+
+            if df_mapped.empty:
+                continue
+
+            # Cache locally (full date range — trim later)
+            try:
+                df_mapped.to_parquet(cache_path)
+            except Exception:
+                pass
+
+            frames[ticker] = df_mapped
+            fetched += 1
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.debug(f"Tiingo: {ticker} not found (404)")
+            else:
+                logger.warning(f"Tiingo: HTTP {e.code} for {ticker}")
+        except Exception as e:
+            logger.debug(f"Tiingo: failed for {ticker}: {e}")
+
+    if not frames:
+        logger.info("Tiingo: no additional data fetched for delisted tickers")
+        return pd.DataFrame()
+
+    logger.info(
+        f"Tiingo: fetched {fetched} tickers (API), {cached} from cache, "
+        f"{len(tickers) - fetched - cached} unavailable"
+    )
+
+    # Build MultiIndex DataFrame matching yfinance format
+    panels = {}
+    for ticker, df_t in frames.items():
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df_t.columns:
+                panels[(ticker, col)] = df_t[col]
+
+    if not panels:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(panels)
+    result.columns = pd.MultiIndex.from_tuples(result.columns)
+    return result
+
+
+def fetch_ohlcv_with_delisted(
+    current_tickers: list[str],
+    historical_tickers: list[str],
+    period: str = DEFAULT_PERIOD,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Fetch OHLCV for current + delisted tickers using yfinance + Tiingo fallback.
+
+    This is the survivorship-bias-free version of fetch_ohlcv().
+
+    1. Fetch all current_tickers via yfinance (fast, batch download)
+    2. Identify which historical_tickers are missing from the yfinance result
+    3. Fetch missing tickers from Tiingo (delisted/acquired stocks)
+    4. Merge into a single MultiIndex DataFrame
+
+    Args:
+        current_tickers: Tickers currently in the S&P 500.
+        historical_tickers: Additional tickers that were in the S&P 500
+            during the training window but have since been removed.
+        period: yfinance period string (e.g., "2y") for current tickers.
+        start_date: Explicit start date for Tiingo (YYYY-MM-DD).
+        end_date: Explicit end date for Tiingo (YYYY-MM-DD).
+
+    Returns:
+        Combined MultiIndex DataFrame with OHLCV for all available tickers.
+    """
+    # Step 1: fetch current tickers via yfinance (the fast path)
+    all_tickers = sorted(set(current_tickers) | set(historical_tickers))
+    yf_df = fetch_ohlcv(all_tickers, period=period)
+
+    # Step 2: identify tickers that yfinance couldn't resolve
+    if isinstance(yf_df.columns, pd.MultiIndex):
+        yf_tickers = set(yf_df.columns.get_level_values(0).unique())
+    else:
+        yf_tickers = set(yf_df.columns)
+
+    missing_tickers = sorted(set(historical_tickers) - yf_tickers)
+
+    if not missing_tickers:
+        logger.info("All historical tickers resolved by yfinance — no Tiingo fallback needed")
+        return yf_df
+
+    logger.info(
+        f"yfinance missing {len(missing_tickers)} historical tickers: "
+        f"{missing_tickers[:20]}{'...' if len(missing_tickers) > 20 else ''}"
+    )
+
+    # Step 3: compute date range for Tiingo
+    if start_date is None:
+        # Infer from yfinance data
+        start_date = yf_df.index.min().strftime("%Y-%m-%d")
+    if end_date is None:
+        end_date = yf_df.index.max().strftime("%Y-%m-%d")
+
+    tiingo_df = fetch_tiingo_ohlcv(missing_tickers, start_date, end_date)
+
+    if tiingo_df.empty:
+        logger.info("Tiingo returned no additional data — proceeding with yfinance only")
+        return yf_df
+
+    # Step 4: merge yfinance + Tiingo DataFrames
+    # Align on date index, fill missing dates naturally
+    combined = pd.concat([yf_df, tiingo_df], axis=1)
+
+    tiingo_tickers = set(tiingo_df.columns.get_level_values(0).unique())
+    still_missing = set(missing_tickers) - tiingo_tickers
+    if still_missing:
+        logger.warning(
+            f"Still missing {len(still_missing)} tickers after Tiingo fallback "
+            f"(truly unavailable): {sorted(still_missing)[:20]}"
+        )
+
+    total_tickers = len(combined.columns.get_level_values(0).unique())
+    logger.info(
+        f"Combined OHLCV: {total_tickers} tickers "
+        f"({len(yf_tickers)} yfinance + {len(tiingo_tickers)} Tiingo)"
+    )
+
+    return combined
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=30),
