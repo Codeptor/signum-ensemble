@@ -12,12 +12,15 @@ Signum is an automated quantitative equity trading bot. It trains a **LightGBM +
 ## Critical Rules
 
 - **Use `uv run` for everything** — `uv run python -m pytest tests/ -x -q --tb=short`, never raw `python` or `pip`
+- **Use `pnpm` for the dashboard** — `pnpm dev`, `pnpm build`, never npm/yarn
 - **Test command:** `uv run python -m pytest tests/ -x -q --tb=short` — must pass **1443+ tests**
 - **Never commit secrets** — `.env`, API keys, SSH keys (`deploy/signum_ed25519`) are gitignored
 - **The bot defaults to paper trading.** Only `LIVE_TRADING=true` env var activates real money. Do not set this.
 - **LSP errors** about unresolved imports (numpy, pandas, pytest, etc.) are pre-existing venv-path issues — **ignore them**
 
 ## Architecture
+
+### Trading Bot (Python)
 
 ```
 examples/live_bot.py          Entry point — runs weekly on Wednesdays
@@ -50,6 +53,72 @@ examples/live_bot.py          Entry point — runs weekly on Wednesdays
     └── python/monitoring/drift.py        KS test + PSI feature drift detection
 ```
 
+### Web Dashboard (Next.js)
+
+```
+dashboard/                              Next.js 16 app (pnpm, Vercel-deployed)
+    ├── app/page.tsx                    Single-page A/B comparison dashboard
+    ├── app/layout.tsx                  Root layout (dark mode, JetBrains Mono)
+    ├── app/api/bot/[bot]/[...path]/    Server-side API proxy → VPS backends
+    │       route.ts                    Maps bot-a/bot-b → BOT_A_URL/BOT_B_URL env vars
+    ├── lib/api.ts                      8 fetch functions (status, positions, risk, tca, drift, equity, logs, health)
+    ├── lib/types.ts                    TypeScript interfaces for all API responses
+    └── components/ui/                  shadcn/ui primitives (card, table, chart, badge, tabs, etc.)
+```
+
+## Dashboard
+
+The Next.js dashboard provides **real-time A/B comparison** of Bot A vs Bot B during paper trading.
+
+**URL:** Deployed on Vercel (`preferredRegion = "bom1"` Mumbai for low VPS latency)
+**Env vars:** `BOT_A_URL`, `BOT_B_URL` (VPS Dash server URLs, set in Vercel project settings)
+
+### Panels (top to bottom)
+
+1. **Header** — "SIGNUM" branding, market session badge (Pre-market/Open/After-hours/Closed) with countdown, Bot A/B tab switcher, triple clock (NY/IST/UTC), auto-refresh countdown (30s)
+2. **Comparison Strip** — Side-by-side Bot A vs Bot B: health dot, equity, P&L vs $100K start, positions, regime, VIX, SPY drawdown
+3. **Hero Metrics** — Portfolio equity/cash/buying power, market regime + exposure multiplier, bot state (online/offline + last shutdown)
+4. **Dual Equity Chart** — Recharts AreaChart overlaying Bot A (solid) and Bot B (dashed) equity curves with tooltip
+5. **Risk Metrics** — Sharpe, Sortino, max drawdown, current drawdown, VaR/CVaR 95%, win rate, total trades
+6. **Sector Exposure** — Horizontal bar chart showing GICS sector weights (when positions exist)
+7. **Positions Table** — Symbol, qty, avg entry, current price, market value, P&L ($/%); footer totals row
+8. **Logs / TCA / Drift** — Live bot logs (80 lines), IS bps + fill rate, drifted feature count + names
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `1` | Switch to Bot A |
+| `2` | Switch to Bot B |
+| `R` | Force immediate refresh |
+| `Space` | Pause/resume auto-refresh |
+
+### Backend API Endpoints (consumed by dashboard)
+
+| Endpoint | Data |
+|----------|------|
+| `/api/status` | Tick, regime, equity, VIX, SPY drawdown, position count |
+| `/api/positions` | Open positions with entry/current prices and P&L |
+| `/api/risk` | Sharpe, Sortino, VaR, CVaR, drawdowns, win rate |
+| `/api/tca` | Avg IS bps, fill rate, trade count |
+| `/api/drift` | Feature drift KS test + PSI results |
+| `/api/equity` | Equity history time series |
+| `/api/logs?lines=80` | Recent bot log output |
+| `/healthz` | Health check (online/offline + last shutdown) |
+
+### Tech Stack
+
+| Component | Detail |
+|-----------|--------|
+| Framework | Next.js 16.1.6 (App Router) |
+| React | 19.2.3 |
+| Styling | Tailwind CSS v4 + shadcn/ui (radix-lyra, oklch dark theme) |
+| Charts | Recharts 2.15.4 |
+| Font | JetBrains Mono |
+| Icons | @hugeicons/react + @hugeicons/core-free-icons |
+| Deployment | Vercel (Mumbai region) |
+| Package manager | pnpm |
+
 ## Key Differences from Bot A (main branch)
 
 | Feature | Bot A (main) | Bot B (this branch) |
@@ -63,6 +132,7 @@ examples/live_bot.py          Entry point — runs weekly on Wednesdays
 | Explainability | None | SHAP per fold + alpha decay analysis |
 | Tracking | None | MLflow experiment tracking |
 | TCA | None | Implementation shortfall in bps per trade |
+| Dashboard | None | Next.js A/B comparison dashboard on Vercel |
 | Tests | 594 | 1443+ |
 
 ## Key Technical Decisions
@@ -76,7 +146,7 @@ examples/live_bot.py          Entry point — runs weekly on Wednesdays
 | Training universe | Full ~500 S&P 500 tickers | No sampling |
 | IC quality gate | `MIN_VALIDATION_IC = 0.02` | Falls back to equal-weight if model is weak |
 | Covariance | Ledoit-Wolf shrinkage (OAS fallback) | Stable with 10 stocks |
-| Ensemble weights | LightGBM 60% + CatBoost 20% + RF 20% (base), Ridge stacking | Diversified signal |
+| Ensemble weights | LightGBM 45% + CatBoost 30% + RF 25% (base), Ridge stacking | Diversified signal |
 | Confidence sizing | blend_alpha=0.3 (70% risk-based, 30% conviction) | Conservative blend |
 | HMM regime | Consensus with threshold for halt (both must agree) | Prevents false liquidation |
 | MLflow | Local file store (`./mlruns/`), auto-pruned at 30 days | No external server needed |

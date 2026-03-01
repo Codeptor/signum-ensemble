@@ -1,12 +1,12 @@
 # Signum
 
 [![CI](https://github.com/Codeptor/signum/actions/workflows/ci.yml/badge.svg)](https://github.com/Codeptor/signum/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-589%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1443%2B%20passed-brightgreen)]()
 [![Paper Trading](https://img.shields.io/badge/status-paper%20trading-blue)]()
 
-Automated quantitative equity trading system. Trains a LightGBM model weekly on S&P 500 data, selects top 10 stocks by predicted 5-day return, optimizes portfolio weights via HRP, and executes through Alpaca with ATR-based stop-loss/take-profit brackets.
+Automated quantitative equity trading system. Trains a **LightGBM + CatBoost + RF ensemble** with a Ridge stacking meta-learner weekly on S&P 500 data, selects top 10 stocks by predicted 5-day residual return, optimizes portfolio weights via HRP with confidence-weighted sizing, and executes through Alpaca with ATR-based stop-loss/take-profit brackets.
 
-Currently paper trading on a DigitalOcean VPS. Collecting data for 3+ months before evaluating for real capital.
+Currently paper trading on a VPS. Bot A (LightGBM, `main` branch) and Bot B (ensemble, `feature/comprehensive-improvements` branch) run side-by-side for A/B comparison via a [Next.js dashboard](#dashboard).
 
 ## How It Works
 
@@ -19,19 +19,23 @@ Scrape S&P 500 tickers (Wikipedia)
 Fetch 2yr daily OHLCV (yfinance, full ~500 S&P 500 universe)
         │
         ▼
-Compute 22 alpha features (momentum, volatility, RSI, volume, cross-sectional ranks, VIX)
+Compute 27 alpha features (11 active in reduced set: momentum, volatility,
+    RSI, volume, cross-sectional ranks, sector-relative momentum, Yang-Zhang vol)
         │
         ▼
-Train LightGBM (Huber loss, residual return target, 80/20 date-split with 5-day embargo)
+Train LightGBM + CatBoost + RF ensemble
+    (Huber loss, residual return target, purged walk-forward CV,
+     5 folds with 22-day embargo, SHAP importance per fold)
         │
         ▼
-Score all ~500 S&P 500 stocks using saved winsorization bounds
+Score all ~500 stocks via Ridge stacking meta-learner
         │
         ▼
 Select top 10 by predicted residual return
         │
         ▼
 Optimize weights via HRP (Ledoit-Wolf covariance shrinkage)
+    + confidence-weighted sizing (70% HRP, 30% conviction blend)
         │
         ▼
 Risk checks (position size, sector exposure, leverage, VaR, drawdown)
@@ -43,31 +47,72 @@ Execute via Alpaca (sells first, then buys, poll for fills)
 Attach OCO brackets (SL = 2x ATR below fill, TP = 3x ATR above fill)
         │
         ▼
-Send trade summary via Telegram, persist state, sleep until next Wednesday
+Log TCA (implementation shortfall in bps), send trade summary via Telegram,
+    persist state, sleep until next Wednesday
 ```
 
 Between Wednesdays the bot sleeps. GTC stop-loss and take-profit orders sit on Alpaca's servers and fire automatically.
 
 ### Regime Detection
 
-The bot monitors VIX and SPY drawdown continuously:
+The bot uses a **Gaussian HMM** (primary) with **VIX/SPY threshold** (fallback). Both must agree to trigger halt — prevents false liquidation.
+
+**HMM regime detector** (3 hidden states, trained on daily returns + rolling vol):
+
+| HMM State | Exposure | Description |
+|-----------|----------|-------------|
+| **Low-vol** | 100% | Normal market conditions |
+| **Normal** | 70% | Elevated volatility |
+| **High-vol** | 30% | Crisis-level volatility |
+
+**Threshold fallback** (used when HMM unavailable, consensus required for halt):
 
 | Regime | Condition | Action |
 |--------|-----------|--------|
 | **Normal** | VIX < 25, SPY DD < 8% | Full exposure |
 | **Caution** | VIX 25-35 or SPY DD 8-15% | 50% exposure (all weights halved) |
-| **Halt** | VIX > 35 and SPY DD > 15% | Liquidate everything, wait 1 hour |
+| **Halt** | VIX > 35 and SPY DD > 15% (+ HMM agrees) | Liquidate everything, wait 1 hour |
 
 De-escalation uses OR logic (either VIX or drawdown clearing allows caution).
 
 ### Model Ensemble
 
-Two-model ensemble with IC-weighted calibration:
+Three-model ensemble with Ridge stacking meta-learner:
 
-- **LightGBM** (60%) — gradient boosting, captures non-linear feature interactions
-- **Random Forest** (40%) — bagging, robust to outliers
+| Model | Base Weight | Role |
+|-------|-------------|------|
+| **LightGBM** | 45% | Gradient boosting, captures non-linear feature interactions |
+| **CatBoost** | 30% | Gradient boosting with ordered target encoding |
+| **Random Forest** | 25% | Bagging, robust to outliers |
 
-Weights are dynamically recalibrated each training cycle using Spearman rank IC on a held-out validation set.
+Base weights are dynamically recalibrated each training cycle using Spearman rank IC on held-out validation data. A **Ridge regression** meta-learner is trained on out-of-sample base model predictions for final scoring. Falls back to IC-weighted averaging when meta-learner is unavailable.
+
+### Alpha Features
+
+27 features computed, 11 active in the reduced set used by the ensemble:
+
+| Feature | Category |
+|---------|----------|
+| `ret_5d`, `ret_20d` | Momentum (short/medium-term) |
+| `mom_12_1` | Jegadeesh-Titman 12-1 momentum |
+| `rsi_14` | Mean reversion (RSI) |
+| `bb_position` | Mean reversion (Bollinger position) |
+| `mr_zscore_60` | Mean reversion (z-score) |
+| `vol_20d` | Volatility (close-to-close) |
+| `vol_yz_20d` | Volatility (Yang-Zhang OHLC) |
+| `volume_ratio` | Volume confirmation |
+| `cs_ret_rank_5d` | Cross-sectional relative strength |
+| `sector_rel_mom` | Sector-relative momentum |
+
+Full 27-feature set preserved for comparison. Features are winsorized at training time with bounds saved and reapplied at inference.
+
+### Training Pipeline
+
+- **Purged walk-forward CV** — 5 folds, 22 business day embargo (matches longest feature lookback), 5-day label purge
+- **SHAP explainability** — per-fold feature importance via `TreeExplainer`, cross-fold stability (Jaccard similarity, Spearman rank correlation)
+- **Alpha decay analysis** — IC measured at horizons [1, 5, 10, 20] days with signal half-life estimation
+- **MLflow tracking** — all metrics, parameters, and fold results logged per training run (local file store, auto-pruned at 30 days)
+- **IC quality gate** — `MIN_VALIDATION_IC = 0.02`; falls back to equal-weight if model is weak
 
 ## Deployment
 
@@ -79,6 +124,8 @@ The bot runs on a VPS as two systemd services:
 | `signum-dashboard` | Dash web UI + JSON API | 8050 (localhost only) |
 
 Both auto-restart on crash and start on boot.
+
+A **Next.js dashboard** is deployed on Vercel for real-time A/B comparison of Bot A vs Bot B. See [Dashboard](#dashboard).
 
 ### Quick Deploy
 
@@ -136,6 +183,7 @@ Control the bot from your phone via Telegram commands:
 | `/health` | System health check |
 | `/trades` | Recent trade info |
 | `/logs` | Last 20 log lines |
+| `/tca` | Transaction cost analysis (IS bps, fill rate) |
 | `/help` | List all commands |
 
 Setup: create a bot via [@BotFather](https://t.me/BotFather), set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
@@ -161,30 +209,38 @@ Transport priority: Telegram (always) > Resend > SendGrid > SMTP for email.
 
 ### Dashboard
 
-Public at `https://dashboard.bhanueso.dev` (nginx reverse proxy + Let's Encrypt SSL).
+**Next.js A/B comparison dashboard** deployed on Vercel (`preferredRegion = "bom1"` Mumbai for low VPS latency).
 
-Two tabs:
-- **Live** — account overview, open positions, regime beacon, equity curve, bot log viewer
-- **Backtest** — historical performance, drawdown, rolling Sharpe
+Provides real-time side-by-side comparison of Bot A (main, LightGBM) vs Bot B (ensemble) during paper trading.
 
-### JSON API
+**Panels:**
+1. **Header** — "SIGNUM" branding, market session badge (Pre-market/Open/After-hours/Closed) with countdown, Bot A/B tab switcher, triple clock (NY/IST/UTC), auto-refresh countdown (30s)
+2. **Comparison Strip** — Side-by-side: health dot, equity, P&L vs $100K start, positions, regime, VIX, SPY drawdown
+3. **Hero Metrics** — Portfolio equity/cash/buying power, market regime + exposure multiplier, bot state (online/offline + last shutdown)
+4. **Dual Equity Chart** — Recharts AreaChart overlaying Bot A (solid) and Bot B (dashed) equity curves
+5. **Risk Metrics** — Sharpe, Sortino, max drawdown, current drawdown, VaR/CVaR 95%, win rate, total trades
+6. **Sector Exposure** — Horizontal bar chart showing GICS sector weights
+7. **Positions Table** — Symbol, qty, avg entry, current price, market value, P&L ($/%); footer totals
+8. **Logs / TCA / Drift** — Live bot logs (80 lines), IS bps + fill rate, drifted feature count
 
-12 endpoints, all return structured JSON with CORS headers:
+**Keyboard shortcuts:** `1` Bot A, `2` Bot B, `R` force refresh, `Space` pause/resume auto-refresh.
+
+**Architecture:** Server-side API proxy (`app/api/bot/[bot]/[...path]/route.ts`) maps `bot-a`/`bot-b` to `BOT_A_URL`/`BOT_B_URL` env vars set in Vercel.
+
+### JSON API (Python backend)
+
+8 endpoints consumed by the Next.js dashboard, all return structured JSON:
 
 | Endpoint | Returns |
 |----------|---------|
-| `GET /api` | Index of all endpoints |
-| `GET /api/status` | System overview (regime + account + bot state) |
-| `GET /api/account` | Alpaca account (equity, cash, buying power) |
-| `GET /api/positions` | Open positions with unrealized P&L |
-| `GET /api/regime` | VIX, SPY drawdown, exposure multiplier |
-| `GET /api/equity` | Equity history time-series |
-| `GET /api/risk` | Full risk engine output (VaR, Sharpe, drawdowns) |
-| `GET /api/drift` | Feature drift report (PSI per feature) |
-| `GET /api/bot` | Bot state (last trade, shutdown reason) |
-| `GET /api/backtest` | Backtest metrics and risk summary |
-| `GET /api/logs` | Bot log lines (`?lines=N`, default 80, max 500) |
-| `GET /healthz` | Health check (bot liveness, alerting, data freshness) |
+| `GET /api/status` | Tick, regime, equity, VIX, SPY drawdown, position count |
+| `GET /api/positions` | Open positions with entry/current prices and P&L |
+| `GET /api/risk` | Sharpe, Sortino, VaR, CVaR, drawdowns, win rate |
+| `GET /api/tca` | Avg IS bps, fill rate, trade count |
+| `GET /api/drift` | Feature drift KS test + PSI results |
+| `GET /api/equity` | Equity history time series |
+| `GET /api/logs?lines=80` | Recent bot log output |
+| `GET /healthz` | Health check (online/offline + last shutdown) |
 
 ## Risk Controls
 
@@ -204,9 +260,13 @@ Two tabs:
 | Check | Limit | Action |
 |-------|-------|--------|
 | Max drawdown | 15% | Kill switch — liquidate all |
+| Graduated drawdown | 10-20% | Linear deleveraging (exposure ramps from 100% to 0%) |
+| Drawdown recovery | 5% | Hysteresis — must recover before re-leveraging |
 | VaR (95%, daily) | 6% | Warning logged |
 | Min Sharpe ratio | -0.5 | Warning logged |
 | Max volatility | 30% annualized | Warning logged |
+
+**Graduated drawdown control:** Linear interpolation of exposure between `max_dd` (10%, full exposure) and `hard_limit` (20%, zero exposure). Hysteresis prevents whipsawing — once deleveraging starts, drawdown must recover below 5% before re-leveraging. Also includes CPPI overlay (floor=90%, multiplier=3.0).
 
 ### Position Protection
 
@@ -225,16 +285,21 @@ signum/
 │   └── paper_trading_tracker.py # CLI portfolio snapshot
 ├── python/
 │   ├── alpha/
-│   │   ├── features.py          # 22 alpha features + winsorization
-│   │   ├── model.py             # LightGBM/CatBoost wrapper
-│   │   ├── ensemble.py          # LightGBM + RF ensemble with IC calibration
-│   │   ├── predict.py           # End-to-end: data → features → rank → optimize
-│   │   └── train.py             # Training pipeline orchestrator
+│   │   ├── features.py          # 27 alpha features (11 active) + winsorization
+│   │   ├── model.py             # LightGBM (Huber loss) wrapper
+│   │   ├── ensemble.py          # LightGBM + CatBoost + RF + Ridge stacking
+│   │   ├── predict.py           # End-to-end: data → features → rank → optimize → confidence sizing
+│   │   ├── train.py             # Purged walk-forward CV + SHAP + alpha decay + MLflow
+│   │   └── explainability.py    # SHAP feature importance per CV fold + stability analysis
 │   ├── portfolio/
 │   │   ├── optimizer.py         # HRP, Min-CVaR, Black-Litterman, Risk Parity
 │   │   ├── risk.py              # VaR, CVaR, Sharpe, Sortino, drawdowns
-│   │   ├── risk_manager.py      # Real-time trade gating
-│   │   └── risk_attribution.py  # Marginal/component risk, Brinson-Fachler
+│   │   ├── risk_manager.py      # Real-time trade gating + graduated drawdown control
+│   │   ├── risk_attribution.py  # Marginal/component risk, Brinson-Fachler
+│   │   ├── tca.py               # Transaction cost analysis (IS bps, fill rates)
+│   │   └── drawdown_control.py  # CPPI overlay, graduated deleveraging
+│   ├── risk/
+│   │   └── volatility.py        # Yang-Zhang, Parkinson, Garman-Klass, EWMA (7 estimators)
 │   ├── bridge/
 │   │   └── execution.py         # Order submission, position tracking, P&L
 │   ├── brokers/
@@ -250,14 +315,24 @@ signum/
 │   │   └── regime_analysis.py   # Per-regime performance breakdown
 │   └── monitoring/
 │       ├── alerting.py          # Multi-channel alerts (Telegram, Resend, SendGrid, SMTP, webhook)
-│       ├── telegram_cmd.py      # Telegram command handler (/status, /positions, etc.)
-│       ├── dashboard.py         # Dash web UI + JSON API (12 endpoints + /healthz)
+│       ├── telegram_cmd.py      # Telegram command handler (/status, /positions, /tca, etc.)
+│       ├── dashboard.py         # Dash web UI + JSON API (8 endpoints + /healthz)
 │       ├── drift.py             # KS test + PSI feature drift detection
-│       └── regime.py            # VIX/SPY-based regime detector
+│       ├── regime.py            # VIX/SPY-based threshold regime detector
+│       └── hmm_regime.py        # Gaussian HMM regime detector (primary)
+├── dashboard/                   # Next.js 16 A/B comparison dashboard (Vercel)
+│   ├── app/
+│   │   ├── page.tsx             # Single-page dashboard
+│   │   ├── layout.tsx           # Root layout (dark mode, JetBrains Mono)
+│   │   └── api/bot/[bot]/[...path]/route.ts  # Server-side API proxy
+│   ├── lib/
+│   │   ├── api.ts               # 8 fetch functions
+│   │   └── types.ts             # TypeScript interfaces
+│   └── components/ui/           # shadcn/ui primitives
 ├── deploy/
 │   ├── signum-bot.service       # systemd service file (trading bot)
 │   └── signum-dashboard.service # systemd service file (web dashboard)
-├── tests/                       # 589 tests
+├── tests/                       # 1443+ tests
 ├── rust/matching-engine/        # Lock-free order book (sub-microsecond)
 ├── run_live_bot.sh              # Bash wrapper with crash recovery
 ├── .env.example                 # Environment variable template
@@ -308,39 +383,41 @@ Walk-forward backtest on S&P 500, LightGBM alpha (22 features), residual return 
 
 ## Audit History
 
-Three rounds of code audit (113+ findings resolved):
+Four audit rounds (113+ findings resolved) plus feature integration:
 
 | Round | Findings | Focus |
 |-------|----------|-------|
 | 1 | 40 | Initial code review |
 | 2 | 56 | Parallel audit by 6 agents across execution + ML pipeline |
 | 3 | 37 | Final pre-paper-trading hardening |
+| Post | — | yfinance circuit breaker, alerting module, Telegram commands, /healthz, structured logging |
+| Feature | 28 | Bug fixes cherry-picked, ensemble + HMM + TCA + confidence sizing integrated |
 
 Key fixes: OCO order construction, train/inference winsorization parity, date-space purged k-fold, geometric Sharpe standardization, Ledoit-Wolf covariance shrinkage, regime de-escalation logic, risk manager weight tracking, dynamic sector classification.
-
-Post-audit additions: yfinance circuit breaker, centralized alerting module (Telegram + email), Telegram command handler, /healthz endpoint, structured JSON logging.
 
 ## Tests
 
 ```bash
 uv run python -m pytest tests/ -x -q --tb=short
-# 589 passed in ~77s
+# 1443+ passed in ~140s
 ```
 
-Coverage includes: ML pipeline (features, model, ensemble, predict), portfolio optimization, risk engine, risk manager, execution bridge, broker integration, backtest validation, robustness analysis, live bot helpers, alerting (Telegram, SendGrid, SMTP, webhook), Telegram command handler, and full integration tests.
+Coverage includes: ML pipeline (features, model, ensemble, predict, explainability), purged walk-forward CV, portfolio optimization, risk engine, risk manager, graduated drawdown control, TCA, execution bridge, broker integration, backtest validation, robustness analysis, HMM regime detection, live bot helpers, alerting (Telegram, SendGrid, SMTP, webhook), Telegram command handler, confidence sizing, alpha decay, and full integration tests.
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| ML | LightGBM, scikit-learn (Random Forest) |
+| ML | LightGBM, CatBoost, scikit-learn (Random Forest, Ridge) |
+| Explainability | SHAP, MLflow |
 | Portfolio | skfolio (HRP, CVaR, BL), Ledoit-Wolf shrinkage |
 | Data | yfinance, pandas |
-| Risk | scipy, numpy |
+| Risk | scipy, numpy, hmmlearn (HMM regime) |
 | Monitoring | Dash, Plotly, Flask (JSON API) |
+| Dashboard | Next.js 16, React 19, Recharts, shadcn/ui, Tailwind CSS v4 |
 | Alerting | Telegram Bot API, Resend, SendGrid, SMTP, webhooks |
 | Broker | Alpaca Markets API (`alpaca-trade-api`) |
-| Infra | DigitalOcean VPS, systemd, nginx, Let's Encrypt |
+| Infra | VPS, systemd, Vercel (dashboard) |
 | Matching Engine | Rust, BTreeMap, Criterion.rs |
 
 ## Design Decisions
@@ -350,6 +427,12 @@ Coverage includes: ML pipeline (features, model, ensemble, predict), portfolio o
 **Weekly rebalancing**: Reduces transaction costs ~74% vs daily. The model predicts 5-day forward returns, matching the rebalance frequency.
 
 **HRP over mean-variance**: HRP uses hierarchical clustering + recursive bisection — no covariance matrix inversion required. More stable with 10 stocks and noisy correlation estimates.
+
+**Three-model ensemble with stacking**: LightGBM captures complex interactions, CatBoost adds ordered boosting diversity, RF provides bagging stability. Ridge stacking on OOS predictions avoids overfitting to any single model's biases. Falls back to IC-weighted averaging gracefully.
+
+**Confidence-weighted sizing**: 70% HRP risk-based weights + 30% conviction from model prediction scores. Conservative blend (alpha=0.3) prevents overconcentration while allowing high-conviction signals to tilt allocation.
+
+**Graduated drawdown control**: Linear deleveraging between 10-20% drawdown avoids the binary kill switch problem where a 14.9% drawdown does nothing but 15.1% liquidates everything. Hysteresis prevents whipsaw re-entry.
 
 **Long-only with market-neutral model**: The model is trained on residual returns but the bot only takes long positions. This wastes half the model's discriminative power by design. A long-short structure would capture more alpha but adds complexity (margin, locate fees, short squeeze risk) that isn't warranted during paper trading validation.
 
