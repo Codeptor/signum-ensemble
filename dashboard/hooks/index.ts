@@ -1,3 +1,5 @@
+"use client";
+
 export { useBotData, type BotData, type UseBotDataReturn } from "./useBotData";
 export {
   useComparisonData,

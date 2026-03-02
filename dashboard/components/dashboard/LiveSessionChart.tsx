@@ -41,7 +41,7 @@ function ChartCrosshair({ points }: { points?: any[]; height?: number }) {
       x1={points[0].x}
       y1={0}
       x2={points[0].x}
-      y2={192}
+      y2={224}
       stroke="rgba(255,255,255,0.10)"
       strokeWidth={1}
       strokeDasharray="2 3"

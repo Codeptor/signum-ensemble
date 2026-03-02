@@ -1,5 +1,3 @@
-"use client";
-
 interface MetricRowProps {
   label: string;
   value: string;
