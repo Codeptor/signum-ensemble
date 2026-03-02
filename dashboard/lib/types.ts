@@ -89,6 +89,12 @@ export interface SessionPoint {
   ts: string;
   equity_a: number | null;
   equity_b: number | null;
+  /** SPY drawdown from rolling peak (negative fraction, e.g. -0.012 = -1.2%). Null for pre-schema rows. */
+  spy_dd: number | null;
+  /** Open position count for Bot A. Null for pre-schema rows. */
+  pos_a: number | null;
+  /** Open position count for Bot B. Null for pre-schema rows. */
+  pos_b: number | null;
 }
 
 export interface SessionHistoryResponse {

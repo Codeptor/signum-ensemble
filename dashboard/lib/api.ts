@@ -75,12 +75,22 @@ export async function storeSessionPoint(
   equityA: number | null,
   equityB: number | null,
   ts?: string,
+  spyDd?: number | null,
+  posA?: number | null,
+  posB?: number | null,
 ): Promise<boolean> {
   try {
     const res = await fetch(`${BASE}/bot-b/api/session/store`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ts, equity_a: equityA, equity_b: equityB }),
+      body: JSON.stringify({
+        ts,
+        equity_a: equityA,
+        equity_b: equityB,
+        spy_dd: spyDd ?? null,
+        pos_a: posA ?? null,
+        pos_b: posB ?? null,
+      }),
       cache: "no-store",
     });
     return res.ok;

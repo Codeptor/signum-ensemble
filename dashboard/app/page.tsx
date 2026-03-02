@@ -53,7 +53,7 @@ import {
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { DateRange } from "react-day-picker";
-import { Area, ComposedChart, Line, ReferenceLine, XAxis, YAxis } from "recharts";
+import { Area, Brush, ComposedChart, Line, ReferenceDot, ReferenceLine, XAxis, YAxis } from "recharts";
 import { SparklesIcon } from "@/components/ui/sparkles";
 import { ClockIcon } from "@/components/ui/clock";
 import { RefreshCWIcon } from "@/components/ui/refresh-cw";
@@ -316,11 +316,15 @@ export default function DashboardPage() {
 
   // Live session accumulator — persisted to localStorage, survives reloads
   const [sessionPoints, setSessionPoints] = React.useState<
-    Array<{ time: string; a: number | null; b: number | null }>
+    Array<{ time: string; a: number | null; b: number | null; spy_dd: number | null; pos_a: number | null; pos_b: number | null }>
   >(() => {
     try {
       const stored = localStorage.getItem("signum_session_equity");
-      if (stored) return JSON.parse(stored);
+      if (stored) {
+        // Backward-compat: old rows lack spy_dd/pos_a/pos_b — fill with null
+        const parsed = JSON.parse(stored) as Array<{ time: string; a: number | null; b: number | null; spy_dd?: number | null; pos_a?: number | null; pos_b?: number | null }>;
+        return parsed.map((p) => ({ spy_dd: null, pos_a: null, pos_b: null, ...p }));
+      }
     } catch {}
     return [];
   });
@@ -416,11 +420,17 @@ export default function DashboardPage() {
           second: "2-digit",
           hour12: false,
         });
+        const spyDd = sA?.regime?.spy_drawdown ?? sB?.regime?.spy_drawdown ?? null;
+        const posA  = sA?.positions_count ?? null;
+        const posB  = sB?.positions_count ?? null;
         setSessionPoints((prev) =>
           [...prev, {
             time,
-            a: eqA != null ? +eqA.toFixed(2) : null,
-            b: eqB != null ? +eqB.toFixed(2) : null,
+            a:      eqA != null ? +eqA.toFixed(2) : null,
+            b:      eqB != null ? +eqB.toFixed(2) : null,
+            spy_dd: spyDd != null ? +spyDd.toFixed(6) : null,
+            pos_a:  posA,
+            pos_b:  posB,
           }].slice(-10_000)
         );
         // Persist to Postgres on Bot B VPS (fire-and-forget — never blocks the UI)
@@ -428,6 +438,9 @@ export default function DashboardPage() {
           eqA != null ? +eqA.toFixed(2) : null,
           eqB != null ? +eqB.toFixed(2) : null,
           now.toISOString(),
+          spyDd != null ? +spyDd.toFixed(6) : null,
+          posA,
+          posB,
         );
       }
     }
@@ -1364,11 +1377,14 @@ const WINDOW_LIMITS: Record<WindowKey, number> = {
 const MA_WINDOW = 5;
 
 const liveChartConfig = {
-  a:         { label: "Bot A",  color: "hsl(160 60% 50%)" },
-  b:         { label: "Bot B",  color: "hsl(213 80% 58%)" },
-  ma_a:      { label: "MA A",   color: "hsl(160 60% 50%)" },
-  ma_b:      { label: "MA B",   color: "hsl(213 80% 58%)" },
-  ma_spread: { label: "MA B−A", color: "hsl(38 90% 58%)"  },
+  a:         { label: "Bot A",   color: "hsl(160 60% 50%)" },
+  b:         { label: "Bot B",   color: "hsl(213 80% 58%)" },
+  spy:       { label: "SPY",     color: "hsl(0 0% 60%)"    },
+  pos_a:     { label: "Pos A",   color: "hsl(160 60% 50%)" },
+  pos_b:     { label: "Pos B",   color: "hsl(213 80% 58%)" },
+  ma_a:      { label: "MA A",    color: "hsl(160 60% 50%)" },
+  ma_b:      { label: "MA B",    color: "hsl(213 80% 58%)" },
+  ma_spread: { label: "MA B−A",  color: "hsl(38 90% 58%)"  },
 } satisfies ChartConfig;
 
 // Rolling mean — requires exactly n non-null values in the window.
@@ -1407,7 +1423,7 @@ function LiveSessionChart({
   data,
   onClear,
 }: {
-  data: Array<{ time: string; a: number | null; b: number | null }>;
+  data: Array<{ time: string; a: number | null; b: number | null; spy_dd: number | null; pos_a: number | null; pos_b: number | null }>;
   onClear: () => void;
 }) {
   const [mode, setMode]             = React.useState<SessionMode>("pnl");
@@ -1442,9 +1458,12 @@ function LiveSessionChart({
   const historyAsPoints = React.useMemo(
     () =>
       historyData.map((p) => ({
-        time: p.ts.slice(11, 19), // HH:MM:SS from ISO string
-        a:    p.equity_a,
-        b:    p.equity_b,
+        time:   p.ts.slice(11, 19), // HH:MM:SS from ISO string
+        a:      p.equity_a,
+        b:      p.equity_b,
+        spy_dd: p.spy_dd ?? null,
+        pos_a:  p.pos_a ?? null,
+        pos_b:  p.pos_b ?? null,
       })),
     [historyData],
   );
@@ -1473,19 +1492,31 @@ function LiveSessionChart({
     return isFinite(limit) ? displayData.slice(-limit) : displayData;
   }, [displayData, timeWindow, historyMode]);
 
-  // Derive chart data. ALL six keys always present — null when inactive.
+  // Derive chart data. ALL keys always present — null when inactive.
   // Stable key count prevents Recharts losing measured dimensions on switch.
   const chartData = React.useMemo(() => {
     if (windowedData.length === 0) return [];
+    // Find first non-null spy_dd in window (anchor for delta calc)
+    const spyDdStart = (windowedData.find((p) => (p as { spy_dd?: number | null }).spy_dd != null) as { spy_dd?: number | null } | undefined)?.spy_dd ?? null;
     const pts = windowedData.map((pt) => {
-      const pnlA = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
-      const pnlB = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
-      const sp   = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
+      const pnlA   = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
+      const pnlB   = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
+      const sp     = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
+      const ptSpyDd = (pt as { spy_dd?: number | null }).spy_dd ?? null;
+      // SPY P&L equivalent: treat $100k as benchmark; delta from session-start spy_dd
+      const spyPnl = mode === "pnl" && ptSpyDd != null && spyDdStart != null
+        ? +((ptSpyDd - spyDdStart) * 100_000).toFixed(2)
+        : null;
+      const posA = (pt as { pos_a?: number | null }).pos_a ?? null;
+      const posB = (pt as { pos_b?: number | null }).pos_b ?? null;
       return {
         time:   pt.time,
         a:      mode === "pnl"    ? pnlA : null,
         b:      mode === "pnl"    ? pnlB : null,
         spread: mode === "spread" ? sp   : null,
+        spy:    spyPnl,
+        pos_a:  posA,
+        pos_b:  posB,
       };
     });
     const maA = rollingMean(pts.map((p) => p.a),      MA_WINDOW);
@@ -1554,6 +1585,40 @@ function LiveSessionChart({
     const pad = Math.max(range * 0.15, minSpread / 2);
     return [lo - pad, hi + pad];
   }, [chartData, mode]);
+
+  // Drawdown from session peak (for OHLC strip annotation)
+  const sessionDdPct = React.useMemo(() => {
+    type DD = { a: number | null; b: number | null };
+    const result: DD = { a: null, b: null };
+    if (chartData.length < 2) return result;
+    const aVals = chartData.map((d) => d.a).filter((v): v is number => v != null);
+    const bVals = chartData.map((d) => d.b).filter((v): v is number => v != null);
+    const calcDd = (vals: number[]) => {
+      if (vals.length === 0) return null;
+      const peak = Math.max(...vals);
+      const now  = vals[vals.length - 1];
+      if (peak === 0) return null;
+      return ((now - peak) / Math.abs(peak)) * 100;
+    };
+    result.a = calcDd(aVals);
+    result.b = calcDd(bVals);
+    return result;
+  }, [chartData]);
+
+  // Significant single-step P&L jump markers (|Δ| > $50)
+  const jumpDots = React.useMemo(() => {
+    const threshold = 50;
+    return chartData.flatMap((pt, i) => {
+      if (i === 0) return [];
+      const prev = chartData[i - 1];
+      const dots: Array<{ time: string; val: number; color: string }> = [];
+      if (pt.a != null && prev.a != null && Math.abs(pt.a - prev.a) > threshold)
+        dots.push({ time: pt.time, val: pt.a, color: "hsl(160 60% 50%)" });
+      if (pt.b != null && prev.b != null && Math.abs(pt.b - prev.b) > threshold)
+        dots.push({ time: pt.time, val: pt.b, color: "hsl(213 80% 58%)" });
+      return dots;
+    });
+  }, [chartData]);
 
   const pillBtn = (active: boolean) =>
     `rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
@@ -1744,7 +1809,14 @@ function LiveSessionChart({
                 <span>O <span className="text-foreground">{fmtStat(stats.a.open)}</span></span>
                 <span>H <span className="text-green-500">{fmtStat(stats.a.high)}</span></span>
                 <span>L <span className="text-red-500">{fmtStat(stats.a.low)}</span></span>
-                <span>Now <span className={stats.a.now >= 0 ? "text-green-500" : "text-red-500"}>{fmtStat(stats.a.now)}</span></span>
+                <span>
+                  Now <span className={stats.a.now >= 0 ? "text-green-500" : "text-red-500"}>{fmtStat(stats.a.now)}</span>
+                  {sessionDdPct.a != null && Math.abs(sessionDdPct.a) > 0.01 && (
+                    <span className="ml-1 text-muted-foreground">
+                      ({sessionDdPct.a > 0 ? "+" : ""}{sessionDdPct.a.toFixed(2)}%)
+                    </span>
+                  )}
+                </span>
               </span>
             )}
             {stats.b && (
@@ -1753,7 +1825,14 @@ function LiveSessionChart({
                 <span>O <span className="text-foreground">{fmtStat(stats.b.open)}</span></span>
                 <span>H <span className="text-green-500">{fmtStat(stats.b.high)}</span></span>
                 <span>L <span className="text-red-500">{fmtStat(stats.b.low)}</span></span>
-                <span>Now <span className={stats.b.now >= 0 ? "text-green-500" : "text-red-500"}>{fmtStat(stats.b.now)}</span></span>
+                <span>
+                  Now <span className={stats.b.now >= 0 ? "text-green-500" : "text-red-500"}>{fmtStat(stats.b.now)}</span>
+                  {sessionDdPct.b != null && Math.abs(sessionDdPct.b) > 0.01 && (
+                    <span className="ml-1 text-muted-foreground">
+                      ({sessionDdPct.b > 0 ? "+" : ""}{sessionDdPct.b.toFixed(2)}%)
+                    </span>
+                  )}
+                </span>
               </span>
             )}
           </div>
@@ -1777,6 +1856,16 @@ function LiveSessionChart({
                 }}
               />
               Bot B
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span
+                className="inline-block h-0.5 w-4 rounded-full"
+                style={{
+                  backgroundColor: "hsl(0 0% 55%)",
+                  backgroundImage: "repeating-linear-gradient(90deg, hsl(0 0% 55%) 0 2px, transparent 2px 6px)",
+                }}
+              />
+              <span className="text-muted-foreground">SPY</span>
             </span>
           </>
         ) : (
@@ -1818,7 +1907,7 @@ function LiveSessionChart({
         })()}
       </div>
 
-      <ChartContainer config={liveChartConfig} className="h-48 w-full">
+      <ChartContainer config={liveChartConfig} className="h-56 w-full">
         <ComposedChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="liveGradA" x1="0" y1="0" x2="0" y2="1">
@@ -1836,6 +1925,7 @@ function LiveSessionChart({
           </defs>
           <XAxis dataKey="time" hide />
           <YAxis
+            yAxisId="pnl"
             tickLine={false}
             axisLine={false}
             fontSize={9}
@@ -1844,11 +1934,14 @@ function LiveSessionChart({
             tick={{ fill: "var(--muted-foreground)" }}
             tickFormatter={fmtPnl}
           />
+          {/* Hidden secondary axis for position count step lines */}
+          <YAxis yAxisId="pos" orientation="right" hide domain={["auto", "auto"]} />
           {/* Zero baseline */}
-          <ReferenceLine y={0} stroke="var(--border)" strokeDasharray="3 3" strokeWidth={1} />
+          <ReferenceLine yAxisId="pnl" y={0} stroke="var(--border)" strokeDasharray="3 3" strokeWidth={1} />
           {/* Session high/low — subtle guides; OHLC strip shows the values */}
           {sessionHigh != null && sessionHigh !== 0 && (
             <ReferenceLine
+              yAxisId="pnl"
               y={sessionHigh}
               stroke="hsl(142 55% 40%)"
               strokeDasharray="2 3"
@@ -1858,6 +1951,7 @@ function LiveSessionChart({
           )}
           {sessionLow != null && sessionLow !== 0 && (
             <ReferenceLine
+              yAxisId="pnl"
               y={sessionLow}
               stroke="hsl(0 62% 52%)"
               strokeDasharray="2 3"
@@ -1871,10 +1965,12 @@ function LiveSessionChart({
               <ChartTooltipContent
                 formatter={(value, name) => {
                   const k = String(name);
-                  if (k.startsWith("ma_")) return null; // suppress MA from tooltip
+                  if (k.startsWith("ma_") || k === "pos_a" || k === "pos_b") return null;
                   const v = Number(value);
                   if (k === "spread")
                     return <span className="tabular-nums">B−A: {v >= 0 ? "+" : ""}${v.toFixed(2)}</span>;
+                  if (k === "spy")
+                    return <span className="tabular-nums text-muted-foreground">SPY: {v >= 0 ? "+" : ""}${v.toFixed(2)}</span>;
                   const label = k === "a" ? "Bot A" : "Bot B";
                   return (
                     <span className="tabular-nums">
@@ -1885,14 +1981,33 @@ function LiveSessionChart({
               />
             }
           />
-          {/* Area fills — stable three-key structure */}
-          <Area type="monotone" dataKey="a"      stroke="hsl(160 60% 50%)" strokeWidth={1.5} fill="url(#liveGradA)"      connectNulls dot={false} isAnimationActive={false} />
-          <Area type="monotone" dataKey="b"      stroke="hsl(213 80% 58%)" strokeWidth={1.5} fill="url(#liveGradB)"      connectNulls dot={false} isAnimationActive={false} strokeDasharray="4 3" />
-          <Area type="monotone" dataKey="spread" stroke="hsl(38 90% 58%)"  strokeWidth={1.5} fill="url(#liveGradSpread)" connectNulls dot={false} isAnimationActive={false} />
+          {/* Area fills — stable key structure; always rendered, null = invisible */}
+          <Area yAxisId="pnl" type="monotone" dataKey="a"      stroke="hsl(160 60% 50%)" strokeWidth={1.5} fill="url(#liveGradA)"      connectNulls dot={false} isAnimationActive={false} />
+          <Area yAxisId="pnl" type="monotone" dataKey="b"      stroke="hsl(213 80% 58%)" strokeWidth={1.5} fill="url(#liveGradB)"      connectNulls dot={false} isAnimationActive={false} strokeDasharray="4 3" />
+          <Area yAxisId="pnl" type="monotone" dataKey="spread" stroke="hsl(38 90% 58%)"  strokeWidth={1.5} fill="url(#liveGradSpread)" connectNulls dot={false} isAnimationActive={false} />
+          {/* SPY benchmark line — gray, always rendered; null when in spread mode */}
+          <Line yAxisId="pnl" type="monotone" dataKey="spy" stroke="hsl(0 0% 55%)" strokeWidth={1} strokeOpacity={0.6} strokeDasharray="2 4" dot={false} isAnimationActive={false} connectNulls />
           {/* MA overlay lines — always rendered; null data = invisible */}
-          <Line type="monotone" dataKey="ma_a"      stroke="hsl(160 60% 50%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
-          <Line type="monotone" dataKey="ma_b"      stroke="hsl(213 80% 58%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
-          <Line type="monotone" dataKey="ma_spread" stroke="hsl(38 90% 58%)"  strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
+          <Line yAxisId="pnl" type="monotone" dataKey="ma_a"      stroke="hsl(160 60% 50%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
+          <Line yAxisId="pnl" type="monotone" dataKey="ma_b"      stroke="hsl(213 80% 58%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
+          <Line yAxisId="pnl" type="monotone" dataKey="ma_spread" stroke="hsl(38 90% 58%)"  strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
+          {/* Position count step lines — faint, secondary axis */}
+          <Line yAxisId="pos" type="stepAfter" dataKey="pos_a" stroke="hsl(160 60% 50%)" strokeWidth={1} strokeOpacity={0.30} dot={false} isAnimationActive={false} connectNulls />
+          <Line yAxisId="pos" type="stepAfter" dataKey="pos_b" stroke="hsl(213 80% 58%)" strokeWidth={1} strokeOpacity={0.30} dot={false} isAnimationActive={false} connectNulls />
+          {/* Significant P&L jump markers */}
+          {jumpDots.map((d, i) => (
+            <ReferenceDot key={i} yAxisId="pnl" x={d.time} y={d.val} r={3} fill={d.color} stroke="var(--background)" strokeWidth={1} />
+          ))}
+          {/* Pan/zoom brush — defaults to last 2h (240 × 30s ticks) */}
+          <Brush
+            dataKey="time"
+            height={18}
+            startIndex={Math.max(0, chartData.length - 240)}
+            travellerWidth={5}
+            stroke="var(--border)"
+            fill="var(--card)"
+            tickFormatter={(v: string) => typeof v === "string" ? v.slice(0, 5) : ""}
+          />
         </ComposedChart>
       </ChartContainer>
     </div>

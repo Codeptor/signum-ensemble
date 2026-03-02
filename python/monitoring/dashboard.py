@@ -1922,16 +1922,22 @@ def register_api_routes(app: dash.Dash) -> None:
             {
                 "ts":       "2026-03-03T10:30:00Z",  // ISO-8601; omit for server NOW()
                 "equity_a": 100199.45,                // null if Bot A offline
-                "equity_b": 100301.23                 // null if Bot B offline
+                "equity_b": 100301.23,                // null if Bot B offline
+                "spy_dd":   -0.011,                   // SPY drawdown from rolling peak
+                "pos_a":    8,                        // Bot A open position count
+                "pos_b":    7                         // Bot B open position count
             }
         """
         from flask import request as _req
 
         try:
             body = _req.get_json(force=True, silent=True) or {}
-            ts = body.get("ts")  # None → Postgres DEFAULT NOW()
+            ts = body.get("ts")
             eq_a = body.get("equity_a")
             eq_b = body.get("equity_b")
+            spy_dd = body.get("spy_dd")
+            pos_a = body.get("pos_a")
+            pos_b = body.get("pos_b")
 
             if eq_a is None and eq_b is None:
                 return _json_response({"error": "Both equity_a and equity_b are null"}, 400)
@@ -1942,16 +1948,13 @@ def register_api_routes(app: dash.Dash) -> None:
 
             with conn:
                 with conn.cursor() as cur:
-                    if ts:
-                        cur.execute(
-                            "INSERT INTO session_equity (ts, equity_a, equity_b) VALUES (%s, %s, %s)",
-                            (ts, eq_a, eq_b),
-                        )
-                    else:
-                        cur.execute(
-                            "INSERT INTO session_equity (equity_a, equity_b) VALUES (%s, %s)",
-                            (eq_a, eq_b),
-                        )
+                    cur.execute(
+                        """INSERT INTO session_equity
+                               (ts, equity_a, equity_b, spy_dd, pos_a, pos_b)
+                           VALUES
+                               (COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s, %s)""",
+                        (ts, eq_a, eq_b, spy_dd, pos_a, pos_b),
+                    )
             conn.close()
             return _json_response({"ok": True})
         except Exception as exc:
@@ -2000,7 +2003,7 @@ def register_api_routes(app: dash.Dash) -> None:
                 cur.execute(
                     """
                     SELECT ts AT TIME ZONE 'America/New_York' AS ts_et,
-                           equity_a, equity_b
+                           equity_a, equity_b, spy_dd, pos_a, pos_b
                     FROM   session_equity
                     WHERE  ts >= %s AND ts <= %s
                     ORDER  BY ts
@@ -2016,6 +2019,9 @@ def register_api_routes(app: dash.Dash) -> None:
                     "ts": row[0].isoformat() if row[0] else None,
                     "equity_a": row[1],
                     "equity_b": row[2],
+                    "spy_dd": row[3],
+                    "pos_a": row[4],
+                    "pos_b": row[5],
                 }
                 for row in rows
             ]
