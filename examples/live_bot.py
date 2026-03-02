@@ -14,6 +14,7 @@ Schedule: run daily ~15 min before market close, or keep running in a loop.
 import json
 import logging
 import logging.handlers
+import math
 import os
 import signal
 import sys
@@ -1021,6 +1022,18 @@ def run_trading_cycle(
                     )
                     sl_tp_qty = actual_qty
 
+                # Alpaca requires whole-share quantities for GTC stop/limit orders.
+                # Round down to nearest integer so SL/TP brackets can use "gtc"
+                # (protecting the position overnight/over the weekend).  The
+                # fractional remainder is left unprotected — negligible risk.
+                sl_tp_qty_whole = math.floor(sl_tp_qty)
+                if sl_tp_qty_whole < 1:
+                    logger.warning(
+                        f"  Position qty {sl_tp_qty:.4f} < 1 whole share for "
+                        f"{entry['symbol']} — skipping GTC SL/TP (too small)"
+                    )
+                    continue
+
                 # Try ATR-based stops first, fall back to fixed %
                 # Use pre-fetched OHLCV from ML pipeline to avoid 10 extra
                 # yfinance calls per rebalance cycle.
@@ -1066,7 +1079,7 @@ def run_trading_cycle(
                     oco_order = BrokerOrder(
                         symbol=entry["symbol"],
                         side="sell",
-                        qty=sl_tp_qty,
+                        qty=sl_tp_qty_whole,
                         order_type="limit",
                         limit_price=tp_price,
                         time_in_force="gtc",
@@ -1076,9 +1089,9 @@ def run_trading_cycle(
                     )
                     oco_id = broker.submit_order(oco_order)
                     logger.info(
-                        f"    OCO SL/TP attached: SELL {sl_tp_qty:.4f} {entry['symbol']} "
+                        f"    OCO SL/TP attached: SELL {sl_tp_qty_whole} {entry['symbol']} "
                         f"SL@${sl_price} ({sl_label}) TP@${tp_price} "
-                        f"(from fill ${fill_price:.2f}) -> {oco_id}"
+                        f"(from fill ${fill_price:.2f}, whole-share GTC) -> {oco_id}"
                     )
                 except Exception as e:
                     logger.error(f"    Failed to attach SL/TP for {entry['symbol']}: {e}")
@@ -1087,7 +1100,7 @@ def run_trading_cycle(
                         sl_order = BrokerOrder(
                             symbol=entry["symbol"],
                             side="sell",
-                            qty=sl_tp_qty,
+                            qty=sl_tp_qty_whole,
                             order_type="stop",
                             stop_price=sl_price,
                             time_in_force="gtc",
@@ -1101,21 +1114,32 @@ def run_trading_cycle(
                     f"    No fill price available for {entry['symbol']} — "
                     f"SL/TP not attached (using quoted price as fallback)"
                 )
-                # Fallback: use the quoted price from the prices dict
+                # Fallback: use the quoted price from the prices dict.
+                # Use whole-share qty for GTC compatibility (Alpaca rejects
+                # fractional GTC stop orders).
                 if entry["symbol"] in prices:
                     try:
                         quoted = prices[entry["symbol"]]
                         sl_price = round(quoted * (1 - STOP_LOSS_PCT), 2)
-                        sl_order = BrokerOrder(
-                            symbol=entry["symbol"],
-                            side="sell",
-                            qty=actual_qty,
-                            order_type="stop",
-                            stop_price=sl_price,
-                            time_in_force="gtc",
-                        )
-                        broker.submit_order(sl_order)
-                        logger.info(f"    SL fallback @ ${sl_price} (quoted price)")
+                        sl_qty_whole = math.floor(actual_qty)
+                        if sl_qty_whole < 1:
+                            logger.warning(
+                                f"    Qty {actual_qty:.4f} < 1 whole share for "
+                                f"{entry['symbol']} — skipping SL fallback"
+                            )
+                        else:
+                            sl_order = BrokerOrder(
+                                symbol=entry["symbol"],
+                                side="sell",
+                                qty=sl_qty_whole,
+                                order_type="stop",
+                                stop_price=sl_price,
+                                time_in_force="gtc",
+                            )
+                            broker.submit_order(sl_order)
+                            logger.info(
+                                f"    SL fallback @ ${sl_price} (quoted price, whole-share GTC)"
+                            )
                     except Exception as e:
                         logger.error(f"    SL fallback also failed for {entry['symbol']}: {e}")
 
