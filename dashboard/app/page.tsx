@@ -308,10 +308,23 @@ export default function DashboardPage() {
   const [equityB, setEquityB] = React.useState<EquityPoint[]>([]);
   const [paused, setPaused] = React.useState(false);
 
-  // Live session accumulator — one point per 30s poll, reset on page load
+  // Live session accumulator — persisted to localStorage, survives reloads
   const [sessionPoints, setSessionPoints] = React.useState<
     Array<{ time: string; a: number | null; b: number | null }>
-  >([]);
+  >(() => {
+    try {
+      const stored = localStorage.getItem("signum_session_equity");
+      if (stored) return JSON.parse(stored);
+    } catch {}
+    return [];
+  });
+
+  // Persist session equity to localStorage on every update
+  React.useEffect(() => {
+    try {
+      localStorage.setItem("signum_session_equity", JSON.stringify(sessionPoints));
+    } catch {}
+  }, [sessionPoints]);
 
   // Dynamic page title
   React.useEffect(() => {
