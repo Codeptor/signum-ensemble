@@ -1,4 +1,4 @@
-import { BotId, StatusData, Position, RiskData, TcaData, DriftData, EquityPoint, HealthData } from "./types";
+import { BotId, StatusData, Position, RiskData, TcaData, DriftData, EquityPoint, HealthData, SessionHistoryResponse } from "./types";
 
 const BASE = "/api/bot";
 
@@ -64,6 +64,50 @@ export async function fetchEquity(bot: BotId): Promise<EquityPoint[]> {
 
 export async function fetchHealth(bot: BotId) {
   return fetchBot<HealthData>(bot, "healthz");
+}
+
+/**
+ * Persist one merged equity snapshot to Bot B's local Postgres.
+ * Always routes to bot-b regardless of the active tab — Bot B is the
+ * central session store for both bots' intraday data.
+ */
+export async function storeSessionPoint(
+  equityA: number | null,
+  equityB: number | null,
+  ts?: string,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/bot-b/api/session/store`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ts, equity_a: equityA, equity_b: equityB }),
+      cache: "no-store",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fetch historical intraday session data from Bot B's Postgres.
+ * @param from YYYY-MM-DD inclusive start (ET)
+ * @param to   YYYY-MM-DD inclusive end   (ET)
+ */
+export async function fetchSessionHistory(
+  from: string,
+  to: string,
+): Promise<SessionHistoryResponse | null> {
+  try {
+    const res = await fetch(
+      `${BASE}/bot-b/api/session/history?from=${from}&to=${to}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchLogs(bot: BotId, lines = 50): Promise<string> {

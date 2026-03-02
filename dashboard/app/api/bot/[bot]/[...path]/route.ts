@@ -9,18 +9,16 @@ const BOT_URLS: Record<string, string> = {
   "bot-b": process.env.BOT_B_URL!,
 };
 
-export async function GET(
+async function proxyToBot(
   request: NextRequest,
-  { params }: { params: Promise<{ bot: string; path: string[] }> }
-) {
-  const { bot, path } = await params;
+  bot: string,
+  path: string[],
+  method: "GET" | "POST",
+  body?: BodyInit,
+): Promise<NextResponse> {
   const baseUrl = BOT_URLS[bot];
-
   if (!baseUrl) {
-    return NextResponse.json(
-      { error: `Unknown bot: ${bot}` },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: `Unknown bot: ${bot}` }, { status: 400 });
   }
 
   const endpoint = `/${path.join("/")}`;
@@ -31,32 +29,47 @@ export async function GET(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 25000);
 
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (method === "POST") headers["Content-Type"] = "application/json";
 
+    const response = await fetch(url, {
+      method,
+      signal: controller.signal,
+      headers,
+      body,
+    });
     clearTimeout(timeout);
 
     if (!response.ok) {
       return NextResponse.json(
         { error: `Bot returned ${response.status}` },
-        { status: response.status }
+        { status: response.status },
       );
     }
 
     const data = await response.json();
     return NextResponse.json(data, {
-      headers: {
-        "Cache-Control": "no-store, max-age=0",
-      },
+      headers: { "Cache-Control": "no-store, max-age=0" },
     });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to reach bot";
-    return NextResponse.json(
-      { error: message, bot, endpoint },
-      { status: 502 }
-    );
+    const message = error instanceof Error ? error.message : "Failed to reach bot";
+    return NextResponse.json({ error: message, bot, endpoint }, { status: 502 });
   }
+}
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ bot: string; path: string[] }> },
+) {
+  const { bot, path } = await params;
+  return proxyToBot(request, bot, path, "GET");
+}
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ bot: string; path: string[] }> },
+) {
+  const { bot, path } = await params;
+  const body = await request.text();
+  return proxyToBot(request, bot, path, "POST", body);
 }

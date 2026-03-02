@@ -19,7 +19,10 @@ import {
   fetchEquity,
   fetchLogs,
   fetchHealth,
+  storeSessionPoint,
+  fetchSessionHistory,
 } from "@/lib/api";
+import { SessionPoint } from "@/lib/types";
 import {
   Card,
   CardContent,
@@ -47,6 +50,9 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import type { DateRange } from "react-day-picker";
 import { Area, ComposedChart, Line, ReferenceLine, XAxis, YAxis } from "recharts";
 import { SparklesIcon } from "@/components/ui/sparkles";
 import { ClockIcon } from "@/components/ui/clock";
@@ -402,7 +408,8 @@ export default function DashboardPage() {
       const eqA = sA?.account?.equity;
       const eqB = sB?.account?.equity;
       if (eqA != null || eqB != null) {
-        const time = new Date().toLocaleTimeString("en-US", {
+        const now = new Date();
+        const time = now.toLocaleTimeString("en-US", {
           timeZone: "America/New_York",
           hour: "2-digit",
           minute: "2-digit",
@@ -415,6 +422,12 @@ export default function DashboardPage() {
             a: eqA != null ? +eqA.toFixed(2) : null,
             b: eqB != null ? +eqB.toFixed(2) : null,
           }].slice(-10_000)
+        );
+        // Persist to Postgres on Bot B VPS (fire-and-forget — never blocks the UI)
+        storeSessionPoint(
+          eqA != null ? +eqA.toFixed(2) : null,
+          eqB != null ? +eqB.toFixed(2) : null,
+          now.toISOString(),
         );
       }
     }
@@ -1276,17 +1289,7 @@ function DualEquityChart({
               <stop offset="100%" stopColor="hsl(213 80% 58%)" stopOpacity={0} />
             </linearGradient>
           </defs>
-          <XAxis
-            dataKey="date"
-            tickLine={false}
-            axisLine={false}
-            fontSize={10}
-            tick={{ fill: "var(--muted-foreground)" }}
-            tickFormatter={(v: string) => {
-              const parts = v.split("-");
-              return `${parts[1]}/${parts[2]}`;
-            }}
-          />
+          <XAxis dataKey="date" hide />
           <YAxis
             tickLine={false}
             axisLine={false}
@@ -1348,12 +1351,13 @@ function DualEquityChart({
 // ── Live Session Chart ──────────────────────────────────────────────────
 
 type SessionMode = "pnl" | "spread";
-type WindowKey = "30m" | "1h" | "4h" | "all";
+type WindowKey = "30m" | "1h" | "2h" | "4h" | "all";
 
 const WINDOW_LIMITS: Record<WindowKey, number> = {
   "30m": 60,
-  "1h": 120,
-  "4h": 480,
+  "1h":  120,
+  "2h":  240,
+  "4h":  480,
   "all": Infinity,
 };
 
@@ -1412,6 +1416,39 @@ function LiveSessionChart({
   const [paused, setPaused]         = React.useState(false);
   const [frozenData, setFrozenData] = React.useState<typeof data>([]);
 
+  // ── History mode ──────────────────────────────────────────────────────
+  const [historyMode, setHistoryMode]         = React.useState(false);
+  const [dateRange, setDateRange]             = React.useState<DateRange | undefined>();
+  const [historyData, setHistoryData]         = React.useState<SessionPoint[]>([]);
+  const [historyLoading, setHistoryLoading]   = React.useState(false);
+  const [calendarOpen, setCalendarOpen]       = React.useState(false);
+
+  const fmtDateLabel = (d: Date) =>
+    d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+  const toYMD = (d: Date) => d.toISOString().slice(0, 10);
+
+  const loadHistory = React.useCallback(async (range: DateRange) => {
+    if (!range.from) return;
+    const from = toYMD(range.from);
+    const to   = toYMD(range.to ?? range.from);
+    setHistoryLoading(true);
+    const res = await fetchSessionHistory(from, to);
+    setHistoryData(res?.history ?? []);
+    setHistoryLoading(false);
+  }, []);
+
+  // Convert Postgres SessionPoint rows → chart-compatible format
+  const historyAsPoints = React.useMemo(
+    () =>
+      historyData.map((p) => ({
+        time: p.ts.slice(11, 19), // HH:MM:SS from ISO string
+        a:    p.equity_a,
+        b:    p.equity_b,
+      })),
+    [historyData],
+  );
+
   const handleTogglePause = () => {
     if (!paused) setFrozenData(data); // snapshot at the moment of pause
     setPaused((p) => !p);
@@ -1422,13 +1459,19 @@ function LiveSessionChart({
     if (!paused) setFrozenData(data);
   }, [data, paused]);
 
-  const displayData = paused ? frozenData : data;
+  // In history mode use the DB rows; otherwise use the live in-memory buffer.
+  const displayData = historyMode
+    ? historyAsPoints
+    : paused
+      ? frozenData
+      : data;
 
-  // Slice to active time window.
+  // Slice to active time window (history mode always shows full range).
   const windowedData = React.useMemo(() => {
+    if (historyMode) return displayData;
     const limit = WINDOW_LIMITS[timeWindow];
     return isFinite(limit) ? displayData.slice(-limit) : displayData;
-  }, [displayData, timeWindow]);
+  }, [displayData, timeWindow, historyMode]);
 
   // Derive chart data. ALL six keys always present — null when inactive.
   // Stable key count prevents Recharts losing measured dimensions on switch.
@@ -1512,13 +1555,44 @@ function LiveSessionChart({
     return [lo - pad, hi + pad];
   }, [chartData, mode]);
 
+  const pillBtn = (active: boolean) =>
+    `rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+      active
+        ? "bg-foreground text-background"
+        : "text-muted-foreground hover:text-foreground"
+    }`;
+
   if (displayData.length < 2) {
     return (
       <div className="flex h-48 flex-col items-center justify-center gap-2">
+        {/* Keep history controls visible in empty state */}
+        {historyMode && (
+          <div className="flex items-center gap-2 mb-2">
+            <button onClick={() => { setHistoryMode(false); setDateRange(undefined); setHistoryData([]); }} className={pillBtn(false)}>
+              ← Live
+            </button>
+            <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+              <PopoverTrigger asChild>
+                <button className="rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors">
+                  {dateRange?.from ? fmtDateLabel(dateRange.from) : "Pick dates"}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start">
+                <Calendar mode="range" selected={dateRange}
+                  onSelect={(range) => { setDateRange(range); if (range?.from) { loadHistory({ from: range.from, to: range.to ?? range.from }); setCalendarOpen(false); } }}
+                  disabled={{ after: new Date() }} numberOfMonths={2} />
+              </PopoverContent>
+            </Popover>
+          </div>
+        )}
         <p className="text-xs text-muted-foreground">
-          {displayData.length === 0
-            ? "Waiting for first poll…"
-            : `Collecting data — ${displayData.length}/2 points`}
+          {historyMode
+            ? historyLoading
+              ? "Loading history…"
+              : "No data for selected range — pick different dates"
+            : displayData.length === 0
+              ? "Waiting for first poll…"
+              : `Collecting data — ${displayData.length}/2 points`}
         </p>
         <div className="flex gap-1">
           {[...Array(3)].map((_, i) => (
@@ -1533,15 +1607,7 @@ function LiveSessionChart({
     );
   }
 
-  const TICK_EVERY = 4;
   const fmtPnl = (v: number) => `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`;
-
-  const pillBtn = (active: boolean) =>
-    `rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-      active
-        ? "bg-foreground text-background"
-        : "text-muted-foreground hover:text-foreground"
-    }`;
 
   return (
     <div className="space-y-3">
@@ -1556,47 +1622,101 @@ function LiveSessionChart({
               </button>
             ))}
           </div>
-          {/* Time window */}
-          <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
-            {(["30m", "1h", "4h", "all"] as WindowKey[]).map((w) => (
-              <button key={w} onClick={() => setTimeWindow(w)} className={pillBtn(timeWindow === w)}>
-                {w === "all" ? "All" : w}
-              </button>
-            ))}
+
+          {/* Time window — hidden in history mode (range controls the window) */}
+          {!historyMode && (
+            <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+              {(["30m", "1h", "2h", "4h", "all"] as WindowKey[]).map((w) => (
+                <button key={w} onClick={() => setTimeWindow(w)} className={pillBtn(timeWindow === w)}>
+                  {w === "all" ? "All" : w}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* History mode toggle + date range picker */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => { setHistoryMode((v) => !v); setDateRange(undefined); setHistoryData([]); }}
+              title={historyMode ? "Back to live session" : "Browse historical sessions"}
+              className={pillBtn(historyMode)}
+            >
+              History
+            </button>
+            {historyMode && (
+              <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+                <PopoverTrigger asChild>
+                  <button className="rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors">
+                    {dateRange?.from
+                      ? dateRange.to && dateRange.to.getTime() !== dateRange.from.getTime()
+                        ? `${fmtDateLabel(dateRange.from)} – ${fmtDateLabel(dateRange.to)}`
+                        : fmtDateLabel(dateRange.from)
+                      : "Pick dates"}
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar
+                    mode="range"
+                    selected={dateRange}
+                    onSelect={(range) => {
+                      setDateRange(range);
+                      if (range?.from) {
+                        loadHistory({ from: range.from, to: range.to ?? range.from });
+                        setCalendarOpen(false);
+                      }
+                    }}
+                    disabled={{ after: new Date() }}
+                    numberOfMonths={2}
+                  />
+                </PopoverContent>
+              </Popover>
+            )}
           </div>
+
           {/* MA toggle */}
           <button
             onClick={() => setShowMA((v) => !v)}
             title={`${showMA ? "Hide" : "Show"} ${MA_WINDOW}-point moving average`}
             className={`rounded border border-border px-2 py-0.5 text-[11px] font-medium transition-colors ${
-              showMA
-                ? "bg-foreground text-background"
-                : "text-muted-foreground hover:text-foreground"
+              showMA ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
             }`}
           >
             MA{MA_WINDOW}
           </button>
         </div>
+
         {/* Right-side actions */}
         <div className="flex items-center gap-1">
-          <button
-            onClick={handleTogglePause}
-            title={paused ? "Resume live data" : "Pause chart"}
-            className={`rounded border border-border px-2 py-0.5 text-[11px] font-medium transition-colors ${
-              paused
-                ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/40"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {paused ? "▶" : "⏸"}
-          </button>
-          <button
-            onClick={onClear}
-            title="Clear session data"
-            className="rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-          >
-            ×
-          </button>
+          {!historyMode && (
+            <button
+              onClick={handleTogglePause}
+              title={paused ? "Resume live data" : "Pause chart"}
+              className={`rounded border border-border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                paused
+                  ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/40"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {paused ? "▶" : "⏸"}
+            </button>
+          )}
+          {!historyMode && (
+            <button
+              onClick={onClear}
+              title="Clear session data"
+              className="rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              ×
+            </button>
+          )}
+          {historyMode && historyLoading && (
+            <span className="text-[10px] text-muted-foreground animate-pulse">Loading…</span>
+          )}
+          {historyMode && !historyLoading && historyData.length > 0 && (
+            <span className="text-[10px] text-muted-foreground tabular-nums">
+              {historyData.length.toLocaleString()} pts
+            </span>
+          )}
         </div>
       </div>
 
@@ -1714,15 +1834,7 @@ function LiveSessionChart({
               <stop offset="100%" stopColor={sFill} stopOpacity={0} />
             </linearGradient>
           </defs>
-          <XAxis
-            dataKey="time"
-            tickLine={false}
-            axisLine={false}
-            fontSize={9}
-            interval={TICK_EVERY - 1}
-            tickFormatter={(v: string) => v.slice(0, 5)}
-            tick={{ fill: "var(--muted-foreground)" }}
-          />
+          <XAxis dataKey="time" hide />
           <YAxis
             tickLine={false}
             axisLine={false}

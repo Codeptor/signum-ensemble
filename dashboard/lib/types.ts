@@ -82,3 +82,18 @@ export interface HealthData {
   uptime?: number;
   [key: string]: unknown;
 }
+
+/** One intraday equity snapshot stored in Postgres on Bot B VPS. */
+export interface SessionPoint {
+  /** ISO-8601 timestamp in ET (from the DB's AT TIME ZONE conversion). */
+  ts: string;
+  equity_a: number | null;
+  equity_b: number | null;
+}
+
+export interface SessionHistoryResponse {
+  history: SessionPoint[];
+  count: number;
+  from: string;
+  to: string;
+}

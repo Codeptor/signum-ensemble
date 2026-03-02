@@ -1892,6 +1892,140 @@ def register_api_routes(app: dash.Dash) -> None:
             }
         )
 
+    # ── Session equity persistence (Postgres) ──────────────────────────────
+    # Bot B VPS hosts a local Postgres DB that permanently stores merged
+    # intraday equity snapshots for both bots.  The dashboard browser client
+    # POSTs one row every 30 s during market hours; history is queried with
+    # optional from/to date-range parameters.
+
+    _SESSION_DB_DSN = os.getenv(
+        "SESSION_DB_DSN",
+        "host=localhost dbname=signum user=signum_user password=signum_pass_2026",
+    )
+
+    def _session_db():
+        """Return a fresh psycopg2 connection.  Caller must close it."""
+        try:
+            import psycopg2  # type: ignore
+
+            return psycopg2.connect(_SESSION_DB_DSN)
+        except Exception as exc:
+            logger.error("session_db connect failed: %s", exc)
+            return None
+
+    @server.route("/api/session/store", methods=["POST"])
+    def session_store():
+        """Persist one merged equity snapshot.
+
+        Expected JSON body::
+
+            {
+                "ts":       "2026-03-03T10:30:00Z",  // ISO-8601; omit for server NOW()
+                "equity_a": 100199.45,                // null if Bot A offline
+                "equity_b": 100301.23                 // null if Bot B offline
+            }
+        """
+        from flask import request as _req
+
+        try:
+            body = _req.get_json(force=True, silent=True) or {}
+            ts = body.get("ts")  # None → Postgres DEFAULT NOW()
+            eq_a = body.get("equity_a")
+            eq_b = body.get("equity_b")
+
+            if eq_a is None and eq_b is None:
+                return _json_response({"error": "Both equity_a and equity_b are null"}, 400)
+
+            conn = _session_db()
+            if conn is None:
+                return _json_response({"error": "DB unavailable"}, 503)
+
+            with conn:
+                with conn.cursor() as cur:
+                    if ts:
+                        cur.execute(
+                            "INSERT INTO session_equity (ts, equity_a, equity_b) VALUES (%s, %s, %s)",
+                            (ts, eq_a, eq_b),
+                        )
+                    else:
+                        cur.execute(
+                            "INSERT INTO session_equity (equity_a, equity_b) VALUES (%s, %s)",
+                            (eq_a, eq_b),
+                        )
+            conn.close()
+            return _json_response({"ok": True})
+        except Exception as exc:
+            logger.error("session_store error: %s", exc)
+            return _json_response({"error": str(exc)}, 500)
+
+    @server.route("/api/session/history")
+    def session_history():
+        """Return stored equity snapshots, optionally filtered by date range.
+
+        Query parameters:
+
+        - ``from`` (YYYY-MM-DD) – inclusive start date in ET; defaults to today
+        - ``to``   (YYYY-MM-DD) – inclusive end date in ET; defaults to today
+        - ``limit`` (int)       – max rows returned; default 10 000
+
+        Response::
+
+            {
+                "history": [
+                    {"ts": "2026-03-03T09:30:00-05:00", "equity_a": ..., "equity_b": ...},
+                    ...
+                ],
+                "count":   780,
+                "from":    "2026-03-03",
+                "to":      "2026-03-03"
+            }
+        """
+        from flask import request as _req
+
+        try:
+            from_date = _req.args.get("from") or datetime.now().strftime("%Y-%m-%d")
+            to_date = _req.args.get("to") or datetime.now().strftime("%Y-%m-%d")
+            limit = min(int(_req.args.get("limit", 50_000)), 100_000)
+
+            # Convert ET dates to UTC range for the query
+            # ET midnight → UTC: +5 h (EST) / +4 h (EDT); use 05:00 as safe offset
+            from_utc = f"{from_date}T04:00:00Z"
+            to_utc = f"{to_date}T23:59:59Z"
+
+            conn = _session_db()
+            if conn is None:
+                return _json_response({"error": "DB unavailable"}, 503)
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ts AT TIME ZONE 'America/New_York' AS ts_et,
+                           equity_a, equity_b
+                    FROM   session_equity
+                    WHERE  ts >= %s AND ts <= %s
+                    ORDER  BY ts
+                    LIMIT  %s
+                    """,
+                    (from_utc, to_utc, limit),
+                )
+                rows = cur.fetchall()
+            conn.close()
+
+            history = [
+                {
+                    "ts": row[0].isoformat() if row[0] else None,
+                    "equity_a": row[1],
+                    "equity_b": row[2],
+                }
+                for row in rows
+            ]
+            return _json_response(
+                {"history": history, "count": len(history), "from": from_date, "to": to_date}
+            )
+        except Exception as exc:
+            logger.error("session_history error: %s", exc)
+            return _json_response({"error": str(exc)}, 500)
+
     # ── GET /healthz — health check (P3-8) ──
     @server.route("/healthz")
     def healthz():
