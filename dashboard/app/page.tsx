@@ -47,7 +47,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { Area, AreaChart, ReferenceLine, XAxis, YAxis } from "recharts";
+import { Area, ComposedChart, Line, ReferenceLine, XAxis, YAxis } from "recharts";
 import { SparklesIcon } from "@/components/ui/sparkles";
 import { ClockIcon } from "@/components/ui/clock";
 import { RefreshCWIcon } from "@/components/ui/refresh-cw";
@@ -389,24 +389,34 @@ export default function DashboardPage() {
     setHealthA(hA != null);
     setHealthB(hB != null);
 
-    // Accumulate live session equity — both bots, every poll
-    const eqA = sA?.account?.equity;
-    const eqB = sB?.account?.equity;
-    if (eqA != null || eqB != null) {
-      const time = new Date().toLocaleTimeString("en-US", {
-        timeZone: "America/New_York",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      });
-      setSessionPoints((prev) =>
-        [...prev, {
-          time,
-          a: eqA != null ? +eqA.toFixed(2) : null,
-          b: eqB != null ? +eqB.toFixed(2) : null,
-        }].slice(-10_000)     // ~83 days of 30s ticks, ~500KB in localStorage
-      );
+    // Accumulate live session equity — only during NYSE market hours (9:30–16:00 ET).
+    // Outside market hours equity is stale (Alpaca returns last-trade prices), so
+    // appending overnight would produce a long flat tail that pollutes the chart.
+    const nowET = new Date(
+      new Date().toLocaleString("en-US", { timeZone: "America/New_York" })
+    );
+    const etMinutes = nowET.getHours() * 60 + nowET.getMinutes();
+    const isMarketOpen = etMinutes >= 9 * 60 + 30 && etMinutes < 16 * 60;
+
+    if (isMarketOpen) {
+      const eqA = sA?.account?.equity;
+      const eqB = sB?.account?.equity;
+      if (eqA != null || eqB != null) {
+        const time = new Date().toLocaleTimeString("en-US", {
+          timeZone: "America/New_York",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        });
+        setSessionPoints((prev) =>
+          [...prev, {
+            time,
+            a: eqA != null ? +eqA.toFixed(2) : null,
+            b: eqB != null ? +eqB.toFixed(2) : null,
+          }].slice(-10_000)
+        );
+      }
     }
   }, [prevRegimeA, prevRegimeB]);
 
@@ -1082,15 +1092,17 @@ function MetricRow({ label, value }: { label: string; value: string }) {
 }
 
 const dualEquityChartConfig = {
-  botA: {
-    label: "Bot A",
-    color: "var(--foreground)",
-  },
-  botB: {
-    label: "Bot B",
-    color: "var(--foreground)",
-  },
+  botA: { label: "Bot A", color: "hsl(160 60% 50%)" },
+  botB: { label: "Bot B", color: "hsl(213 80% 58%)" },
 } satisfies ChartConfig;
+
+type EquityDisplayMode = "abs" | "pct";
+
+// Return all Wednesday dates (YYYY-MM-DD) present in the data set.
+// Uses the actual date keys so ReferenceLine x values always match.
+function extractWednesdays(dates: string[]): string[] {
+  return dates.filter((d) => new Date(d + "T12:00:00Z").getUTCDay() === 3);
+}
 
 function DualEquityChart({
   dataA,
@@ -1099,10 +1111,12 @@ function DualEquityChart({
   dataA: EquityPoint[];
   dataB: EquityPoint[];
 }) {
-  // Merge both series by date into a single array
+  const [equityMode, setEquityMode] = React.useState<EquityDisplayMode>("abs");
+
+  // Merge both series by date (last value per day wins)
   const dateMap = new Map<string, { date: string; botA?: number; botB?: number }>();
   for (const d of dataA) {
-    const key = d.timestamp.slice(0, 10); // YYYY-MM-DD
+    const key = d.timestamp.slice(0, 10);
     const existing = dateMap.get(key) || { date: key };
     existing.botA = d.equity;
     dateMap.set(key, existing);
@@ -1113,90 +1127,221 @@ function DualEquityChart({
     existing.botB = d.equity;
     dateMap.set(key, existing);
   }
-  const chartData = Array.from(dateMap.values()).sort((a, b) =>
+  const merged = Array.from(dateMap.values()).sort((a, b) =>
     a.date.localeCompare(b.date)
   );
 
-  // Tight Y domain — avoids chart showing 0-100k when equity sits at ~100k
+  // Insufficient history — need ≥3 unique trading days to draw a useful curve
+  if (merged.length < 3) {
+    return (
+      <div className="flex h-72 flex-col items-center justify-center gap-2">
+        <p className="text-xs text-muted-foreground">
+          Building history… {merged.length}/3 days
+        </p>
+        <div className="flex gap-1">
+          {[...Array(3)].map((_, i) => (
+            <span
+              key={i}
+              className="inline-block h-1 w-4 rounded-full bg-muted animate-pulse"
+              style={{ animationDelay: `${i * 200}ms` }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const toDisplay = (equity: number) =>
+    equityMode === "abs"
+      ? equity
+      : +((equity - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(3);
+
+  const chartData = merged.map((pt) => ({
+    date: pt.date,
+    botA: pt.botA != null ? toDisplay(pt.botA) : undefined,
+    botB: pt.botB != null ? toDisplay(pt.botB) : undefined,
+  }));
+
+  const wednesdays = extractWednesdays(merged.map((d) => d.date));
+
+  const fmtY = (v: number) =>
+    equityMode === "abs"
+      ? `$${(v / 1000).toFixed(1)}k`
+      : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+
   const yDomain = React.useMemo((): [number, number] => {
     const vals = chartData
       .flatMap((pt) => [pt.botA, pt.botB])
       .filter((v): v is number => v != null);
-    if (vals.length === 0) return [99_000, 101_000];
+    if (vals.length === 0)
+      return equityMode === "abs" ? [99_000, 101_000] : [-1, 1];
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
     const spread = hi - lo;
-    // Floor spread: $200 so a flat line still has visible y-axis range
-    const minSpread = 200;
+    const minSpread = equityMode === "abs" ? 200 : 0.2;
     const pad = Math.max(spread * 0.15, minSpread / 2);
     return [lo - pad, hi + pad];
-  }, [chartData]);
+  }, [chartData, equityMode]);
+
+  // Last-value pinned dot+label rendered only at the final data index
+  const makeDot =
+    (color: string) =>
+    (dotProps: unknown) => {
+      const { cx, cy, index, value } = dotProps as {
+        cx: number;
+        cy: number;
+        index: number;
+        value?: number;
+      };
+      if (index !== chartData.length - 1 || value == null)
+        return <g key={index} />;
+      return (
+        <g key={index}>
+          <circle cx={cx} cy={cy} r={2.5} fill={color} />
+          <text
+            x={cx + 5}
+            y={cy}
+            fontSize={9}
+            fill={color}
+            dominantBaseline="middle"
+          >
+            {fmtY(value)}
+          </text>
+        </g>
+      );
+    };
 
   return (
-    <ChartContainer config={dualEquityChartConfig} className="h-72 w-full">
-      <AreaChart data={chartData}>
-        <defs>
-          <linearGradient id="gradientA" x1="0" y1="0" x2="0" y2="1">
-            <stop
-              offset="0%"
-              stopColor="var(--foreground)"
-              stopOpacity={0.12}
+    <div className="space-y-3">
+      {/* Control bar */}
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+          {(["abs", "pct"] as EquityDisplayMode[]).map((m) => (
+            <button
+              key={m}
+              onClick={() => setEquityMode(m)}
+              className={`rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                equityMode === m
+                  ? "bg-foreground text-background"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {m === "abs" ? "Equity $" : "Return %"}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-4 rounded-full"
+              style={{ backgroundColor: "hsl(160 60% 50%)" }}
             />
-            <stop
-              offset="100%"
-              stopColor="var(--foreground)"
-              stopOpacity={0}
+            Bot A
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-4 rounded-full"
+              style={{
+                backgroundColor: "hsl(213 80% 58%)",
+                backgroundImage:
+                  "repeating-linear-gradient(90deg, hsl(213 80% 58%) 0 4px, transparent 4px 7px)",
+              }}
             />
-          </linearGradient>
-        </defs>
-        <XAxis
-          dataKey="date"
-          tickLine={false}
-          axisLine={false}
-          tickFormatter={(v: string) => {
-            const parts = v.split("-");
-            return `${parts[1]}/${parts[2]}`;
-          }}
-          fontSize={10}
-        />
-        <YAxis
-          tickLine={false}
-          axisLine={false}
-          tickFormatter={(v: number) => `$${(v / 1000).toFixed(1)}k`}
-          fontSize={10}
-          width={54}
-          domain={yDomain}
-        />
-        <ChartTooltip
-          content={
-            <ChartTooltipContent
-              formatter={(value, name) => (
-                <span className="tabular-nums">
-                  {String(name) === "botA" ? "A" : "B"}: {fmtUsd(Number(value))}
-                </span>
-              )}
+            Bot B
+          </span>
+          {wednesdays.length > 0 && (
+            <span className="flex items-center gap-1.5">
+              <span
+                className="inline-block h-3 border-l"
+                style={{
+                  borderColor: "hsl(38 70% 50%)",
+                  borderStyle: "dashed",
+                }}
+              />
+              Rebalance
+            </span>
+          )}
+        </div>
+      </div>
+
+      <ChartContainer config={dualEquityChartConfig} className="h-72 w-full">
+        <ComposedChart data={chartData} margin={{ top: 4, right: 48, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id="gradientA" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="hsl(160 60% 50%)" stopOpacity={0.15} />
+              <stop offset="100%" stopColor="hsl(160 60% 50%)" stopOpacity={0} />
+            </linearGradient>
+            <linearGradient id="gradientB" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="hsl(213 80% 58%)" stopOpacity={0.10} />
+              <stop offset="100%" stopColor="hsl(213 80% 58%)" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <XAxis
+            dataKey="date"
+            tickLine={false}
+            axisLine={false}
+            fontSize={10}
+            tick={{ fill: "var(--muted-foreground)" }}
+            tickFormatter={(v: string) => {
+              const parts = v.split("-");
+              return `${parts[1]}/${parts[2]}`;
+            }}
+          />
+          <YAxis
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={fmtY}
+            fontSize={10}
+            width={equityMode === "abs" ? 54 : 62}
+            domain={yDomain}
+            tick={{ fill: "var(--muted-foreground)" }}
+          />
+          {/* Wednesday rebalance markers */}
+          {wednesdays.map((d) => (
+            <ReferenceLine
+              key={d}
+              x={d}
+              stroke="hsl(38 70% 50%)"
+              strokeOpacity={0.4}
+              strokeDasharray="2 4"
+              strokeWidth={1}
             />
-          }
-        />
-        <Area
-          type="monotone"
-          dataKey="botA"
-          stroke="var(--foreground)"
-          strokeWidth={1.5}
-          fill="url(#gradientA)"
-          connectNulls
-        />
-        <Area
-          type="monotone"
-          dataKey="botB"
-          stroke="var(--foreground)"
-          strokeWidth={1.5}
-          strokeDasharray="4 3"
-          fill="none"
-          connectNulls
-        />
-      </AreaChart>
-    </ChartContainer>
+          ))}
+          <ChartTooltip
+            content={
+              <ChartTooltipContent
+                formatter={(value, name) => (
+                  <span className="tabular-nums">
+                    {String(name) === "botA" ? "A" : "B"}: {fmtY(Number(value))}
+                  </span>
+                )}
+              />
+            }
+          />
+          <Area
+            type="monotone"
+            dataKey="botA"
+            stroke="hsl(160 60% 50%)"
+            strokeWidth={1.5}
+            fill="url(#gradientA)"
+            connectNulls
+            dot={makeDot("hsl(160 60% 50%)")}
+            isAnimationActive={false}
+          />
+          <Area
+            type="monotone"
+            dataKey="botB"
+            stroke="hsl(213 80% 58%)"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            fill="url(#gradientB)"
+            connectNulls
+            dot={makeDot("hsl(213 80% 58%)")}
+            isAnimationActive={false}
+          />
+        </ComposedChart>
+      </ChartContainer>
+    </div>
   );
 }
 
@@ -1212,10 +1357,25 @@ const WINDOW_LIMITS: Record<WindowKey, number> = {
   "all": Infinity,
 };
 
+const MA_WINDOW = 5;
+
 const liveChartConfig = {
-  a: { label: "Bot A", color: "hsl(160 60% 50%)" },
-  b: { label: "Bot B", color: "hsl(213 80% 58%)" },
+  a:         { label: "Bot A",  color: "hsl(160 60% 50%)" },
+  b:         { label: "Bot B",  color: "hsl(213 80% 58%)" },
+  ma_a:      { label: "MA A",   color: "hsl(160 60% 50%)" },
+  ma_b:      { label: "MA B",   color: "hsl(213 80% 58%)" },
+  ma_spread: { label: "MA B−A", color: "hsl(38 90% 58%)"  },
 } satisfies ChartConfig;
+
+// Rolling mean — requires exactly n non-null values in the window.
+function rollingMean(vals: (number | null)[], n: number): (number | null)[] {
+  return vals.map((_, i) => {
+    if (i < n - 1) return null;
+    const slice = vals.slice(i - n + 1, i + 1);
+    if (slice.some((v) => v == null)) return null;
+    return (slice as number[]).reduce((a, b) => a + b, 0) / n;
+  });
+}
 
 // Vertical dashed crosshair line rendered via the Recharts `cursor` prop.
 function ChartCrosshair({
@@ -1246,42 +1406,64 @@ function LiveSessionChart({
   data: Array<{ time: string; a: number | null; b: number | null }>;
   onClear: () => void;
 }) {
-  const [mode, setMode] = React.useState<SessionMode>("pnl");
+  const [mode, setMode]             = React.useState<SessionMode>("pnl");
   const [timeWindow, setTimeWindow] = React.useState<WindowKey>("all");
+  const [showMA, setShowMA]         = React.useState(false);
+  const [paused, setPaused]         = React.useState(false);
+  const [frozenData, setFrozenData] = React.useState<typeof data>([]);
 
-  // Slice data to the active time window before computing chart values.
+  const handleTogglePause = () => {
+    if (!paused) setFrozenData(data); // snapshot at the moment of pause
+    setPaused((p) => !p);
+  };
+
+  // When unpaused, keep frozen snapshot in sync so resume is seamless.
+  React.useEffect(() => {
+    if (!paused) setFrozenData(data);
+  }, [data, paused]);
+
+  const displayData = paused ? frozenData : data;
+
+  // Slice to active time window.
   const windowedData = React.useMemo(() => {
     const limit = WINDOW_LIMITS[timeWindow];
-    return isFinite(limit) ? data.slice(-limit) : data;
-  }, [data, timeWindow]);
+    return isFinite(limit) ? displayData.slice(-limit) : displayData;
+  }, [displayData, timeWindow]);
 
-  // Derive chart data from the raw equity readings.
-  // ALL THREE keys (a, b, spread) are always present — unused ones are null.
-  // This keeps the AreaChart's child tree identical across mode switches so
-  // Recharts never loses its measured dimensions.
+  // Derive chart data. ALL six keys always present — null when inactive.
+  // Stable key count prevents Recharts losing measured dimensions on switch.
   const chartData = React.useMemo(() => {
     if (windowedData.length === 0) return [];
-    return windowedData.map((pt) => {
+    const pts = windowedData.map((pt) => {
       const pnlA = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
       const pnlB = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
       const sp   = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
       return {
         time:   pt.time,
-        a:      mode === "pnl" ? pnlA : null,
-        b:      mode === "pnl" ? pnlB : null,
-        spread: mode === "spread" ? sp : null,
+        a:      mode === "pnl"    ? pnlA : null,
+        b:      mode === "pnl"    ? pnlB : null,
+        spread: mode === "spread" ? sp   : null,
       };
     });
-  }, [windowedData, mode]);
+    const maA = rollingMean(pts.map((p) => p.a),      MA_WINDOW);
+    const maB = rollingMean(pts.map((p) => p.b),      MA_WINDOW);
+    const maS = rollingMean(pts.map((p) => p.spread), MA_WINDOW);
+    return pts.map((p, i) => ({
+      ...p,
+      ma_a:      showMA ? maA[i] : null,
+      ma_b:      showMA ? maB[i] : null,
+      ma_spread: showMA ? maS[i] : null,
+    }));
+  }, [windowedData, mode, showMA]);
 
-  // Profitability-aware fill colours — stroke stays as identity colour for A/B.
+  // Profitability-aware fill colours.
   const lastPt = chartData.length > 0 ? chartData[chartData.length - 1] : null;
   const aFill  = (lastPt?.a  ?? 0) >= 0 ? "hsl(142 55% 40%)" : "hsl(0 62% 52%)";
   const bFill  = (lastPt?.b  ?? 0) >= 0 ? "hsl(213 70% 52%)" : "hsl(20 70% 50%)";
   const sFill  = ((lastPt as { spread?: number | null } | null)?.spread ?? 0) >= 0
     ? "hsl(38 85% 52%)" : "hsl(0 62% 52%)";
 
-  // Open / High / Low / Now stat strip
+  // Open / High / Low / Now stat strip.
   const stats = React.useMemo(() => {
     type OHLC = { open: number; high: number; low: number; now: number };
     const summarize = (vals: number[]): OHLC | null =>
@@ -1299,20 +1481,29 @@ function LiveSessionChart({
     return { a: summarize(aVals), b: summarize(bVals), spread: summarize(sVals) };
   }, [chartData]);
 
-  // Tight Y domain — pad so tiny moves are visible
+  // Session H/L for reference lines.
+  const sessionHigh = React.useMemo(() => {
+    if (mode === "spread") return stats.spread?.high ?? null;
+    const h = Math.max(stats.a?.high ?? -Infinity, stats.b?.high ?? -Infinity);
+    return isFinite(h) ? h : null;
+  }, [mode, stats]);
+  const sessionLow = React.useMemo(() => {
+    if (mode === "spread") return stats.spread?.low ?? null;
+    const l = Math.min(stats.a?.low ?? Infinity, stats.b?.low ?? Infinity);
+    return isFinite(l) ? l : null;
+  }, [mode, stats]);
+
+  // Tight Y domain.
   const yDomain = React.useMemo((): [number, number] => {
     let vals: number[];
     if (mode === "spread") {
-      vals = chartData.flatMap((pt) => {
-        const s = (pt as { spread?: number | null }).spread;
-        return s != null ? [s] : [];
-      });
+      vals = chartData
+        .map((pt) => (pt as { spread?: number | null }).spread)
+        .filter((v): v is number => v != null);
     } else {
       vals = chartData.flatMap((pt) => [pt.a, pt.b]).filter((v): v is number => v != null);
     }
-    if (vals.length === 0) {
-      return mode === "spread" ? [-50, 50] : [-100, 100];
-    }
+    if (vals.length === 0) return mode === "spread" ? [-50, 50] : [-100, 100];
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
     const range = hi - lo;
@@ -1321,13 +1512,13 @@ function LiveSessionChart({
     return [lo - pad, hi + pad];
   }, [chartData, mode]);
 
-  if (data.length < 2) {
+  if (displayData.length < 2) {
     return (
       <div className="flex h-48 flex-col items-center justify-center gap-2">
         <p className="text-xs text-muted-foreground">
-          {data.length === 0
+          {displayData.length === 0
             ? "Waiting for first poll…"
-            : `Collecting data — ${data.length}/2 points`}
+            : `Collecting data — ${displayData.length}/2 points`}
         </p>
         <div className="flex gap-1">
           {[...Array(3)].map((_, i) => (
@@ -1342,58 +1533,71 @@ function LiveSessionChart({
     );
   }
 
-  // Fixed tick every 4 points (= 2 min at 30s intervals) so labels
-  // accumulate naturally as data grows instead of staying pinned at 8.
   const TICK_EVERY = 4;
-
   const fmtPnl = (v: number) => `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`;
+
+  const pillBtn = (active: boolean) =>
+    `rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+      active
+        ? "bg-foreground text-background"
+        : "text-muted-foreground hover:text-foreground"
+    }`;
 
   return (
     <div className="space-y-3">
       {/* Control bar */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {/* Mode toggle */}
-        <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
-          {(["pnl", "spread"] as SessionMode[]).map((m) => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={`rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-                mode === m
-                  ? "bg-foreground text-background"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {m === "pnl" ? "P&L Δ" : "B−A"}
-            </button>
-          ))}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Mode */}
+          <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+            {(["pnl", "spread"] as SessionMode[]).map((m) => (
+              <button key={m} onClick={() => setMode(m)} className={pillBtn(mode === m)}>
+                {m === "pnl" ? "P&L Δ" : "B−A"}
+              </button>
+            ))}
+          </div>
+          {/* Time window */}
+          <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+            {(["30m", "1h", "4h", "all"] as WindowKey[]).map((w) => (
+              <button key={w} onClick={() => setTimeWindow(w)} className={pillBtn(timeWindow === w)}>
+                {w === "all" ? "All" : w}
+              </button>
+            ))}
+          </div>
+          {/* MA toggle */}
+          <button
+            onClick={() => setShowMA((v) => !v)}
+            title={`${showMA ? "Hide" : "Show"} ${MA_WINDOW}-point moving average`}
+            className={`rounded border border-border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+              showMA
+                ? "bg-foreground text-background"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            MA{MA_WINDOW}
+          </button>
         </div>
-
-        {/* Time window buttons */}
-        <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
-          {(["30m", "1h", "4h", "all"] as WindowKey[]).map((w) => (
-            <button
-              key={w}
-              onClick={() => setTimeWindow(w)}
-              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                timeWindow === w
-                  ? "bg-foreground text-background"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {w === "all" ? "All" : w}
-            </button>
-          ))}
+        {/* Right-side actions */}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={handleTogglePause}
+            title={paused ? "Resume live data" : "Pause chart"}
+            className={`rounded border border-border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+              paused
+                ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/40"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {paused ? "▶" : "⏸"}
+          </button>
+          <button
+            onClick={onClear}
+            title="Clear session data"
+            className="rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+          >
+            ×
+          </button>
         </div>
-
-        {/* Clear session */}
-        <button
-          onClick={onClear}
-          title="Clear session data"
-          className="ml-auto rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground border border-border transition-colors"
-        >
-          ×
-        </button>
       </div>
 
       {/* OHLC stat strip */}
@@ -1461,6 +1665,9 @@ function LiveSessionChart({
             Bot B − Bot A (positive = B winning)
           </span>
         )}
+        {paused && (
+          <span className="text-yellow-400 text-[10px]">⏸ paused</span>
+        )}
         {chartData.length > 0 && (() => {
           const last = chartData[chartData.length - 1];
           if (mode === "spread") {
@@ -1492,7 +1699,7 @@ function LiveSessionChart({
       </div>
 
       <ChartContainer config={liveChartConfig} className="h-48 w-full">
-        <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+        <ComposedChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="liveGradA" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={aFill} stopOpacity={0.20} />
@@ -1523,28 +1730,40 @@ function LiveSessionChart({
             width={58}
             domain={yDomain}
             tick={{ fill: "var(--muted-foreground)" }}
-            tickFormatter={(v: number) => fmtPnl(v)}
+            tickFormatter={fmtPnl}
           />
-          <ReferenceLine
-            y={0}
-            stroke="var(--border)"
-            strokeDasharray="3 3"
-            strokeWidth={1}
-          />
+          {/* Zero baseline */}
+          <ReferenceLine y={0} stroke="var(--border)" strokeDasharray="3 3" strokeWidth={1} />
+          {/* Session high/low — subtle guides; OHLC strip shows the values */}
+          {sessionHigh != null && sessionHigh !== 0 && (
+            <ReferenceLine
+              y={sessionHigh}
+              stroke="hsl(142 55% 40%)"
+              strokeDasharray="2 3"
+              strokeWidth={1}
+              strokeOpacity={0.55}
+            />
+          )}
+          {sessionLow != null && sessionLow !== 0 && (
+            <ReferenceLine
+              y={sessionLow}
+              stroke="hsl(0 62% 52%)"
+              strokeDasharray="2 3"
+              strokeWidth={1}
+              strokeOpacity={0.55}
+            />
+          )}
           <ChartTooltip
             cursor={<ChartCrosshair />}
             content={
               <ChartTooltipContent
                 formatter={(value, name) => {
+                  const k = String(name);
+                  if (k.startsWith("ma_")) return null; // suppress MA from tooltip
                   const v = Number(value);
-                  if (String(name) === "spread") {
-                    return (
-                      <span className="tabular-nums">
-                        B−A: {v >= 0 ? "+" : ""}${v.toFixed(2)}
-                      </span>
-                    );
-                  }
-                  const label = String(name) === "a" ? "Bot A" : "Bot B";
+                  if (k === "spread")
+                    return <span className="tabular-nums">B−A: {v >= 0 ? "+" : ""}${v.toFixed(2)}</span>;
+                  const label = k === "a" ? "Bot A" : "Bot B";
                   return (
                     <span className="tabular-nums">
                       {label}: {v >= 0 ? "+" : ""}${Math.abs(v).toFixed(2)}
@@ -1554,41 +1773,15 @@ function LiveSessionChart({
               />
             }
           />
-          {/* Always render all three Areas — unused keys are null so they
-              render nothing, but the stable child tree prevents Recharts
-              from losing its measured dimensions on mode switch. */}
-          <Area
-            type="monotone"
-            dataKey="a"
-            stroke="hsl(160 60% 50%)"
-            strokeWidth={1.5}
-            fill="url(#liveGradA)"
-            connectNulls
-            dot={false}
-            isAnimationActive={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="b"
-            stroke="hsl(213 80% 58%)"
-            strokeWidth={1.5}
-            strokeDasharray="4 3"
-            fill="url(#liveGradB)"
-            connectNulls
-            dot={false}
-            isAnimationActive={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="spread"
-            stroke="hsl(38 90% 58%)"
-            strokeWidth={1.5}
-            fill="url(#liveGradSpread)"
-            connectNulls
-            dot={false}
-            isAnimationActive={false}
-          />
-        </AreaChart>
+          {/* Area fills — stable three-key structure */}
+          <Area type="monotone" dataKey="a"      stroke="hsl(160 60% 50%)" strokeWidth={1.5} fill="url(#liveGradA)"      connectNulls dot={false} isAnimationActive={false} />
+          <Area type="monotone" dataKey="b"      stroke="hsl(213 80% 58%)" strokeWidth={1.5} fill="url(#liveGradB)"      connectNulls dot={false} isAnimationActive={false} strokeDasharray="4 3" />
+          <Area type="monotone" dataKey="spread" stroke="hsl(38 90% 58%)"  strokeWidth={1.5} fill="url(#liveGradSpread)" connectNulls dot={false} isAnimationActive={false} />
+          {/* MA overlay lines — always rendered; null data = invisible */}
+          <Line type="monotone" dataKey="ma_a"      stroke="hsl(160 60% 50%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
+          <Line type="monotone" dataKey="ma_b"      stroke="hsl(213 80% 58%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
+          <Line type="monotone" dataKey="ma_spread" stroke="hsl(38 90% 58%)"  strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
+        </ComposedChart>
       </ChartContainer>
     </div>
   );
