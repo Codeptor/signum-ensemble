@@ -758,7 +758,7 @@ export default function DashboardPage() {
             </div>
           </CardHeader>
           <CardContent>
-            <LiveSessionChart data={sessionPoints} />
+            <LiveSessionChart data={sessionPoints} onClear={() => setSessionPoints([])} />
           </CardContent>
         </Card>
 
@@ -1202,40 +1202,102 @@ function DualEquityChart({
 
 // ── Live Session Chart ──────────────────────────────────────────────────
 
-type SessionMode = "pnl" | "return" | "spread";
+type SessionMode = "pnl" | "spread";
+type WindowKey = "30m" | "1h" | "4h" | "all";
+
+const WINDOW_LIMITS: Record<WindowKey, number> = {
+  "30m": 60,
+  "1h": 120,
+  "4h": 480,
+  "all": Infinity,
+};
 
 const liveChartConfig = {
   a: { label: "Bot A", color: "hsl(160 60% 50%)" },
   b: { label: "Bot B", color: "hsl(213 80% 58%)" },
 } satisfies ChartConfig;
 
+// Vertical dashed crosshair line rendered via the Recharts `cursor` prop.
+function ChartCrosshair({
+  points,
+  height = 192,
+}: {
+  points?: Array<{ x: number; y: number }>;
+  height?: number;
+}) {
+  if (!points?.[0]) return null;
+  return (
+    <line
+      x1={points[0].x}
+      y1={0}
+      x2={points[0].x}
+      y2={height}
+      stroke="rgba(255,255,255,0.10)"
+      strokeWidth={1}
+      strokeDasharray="2 3"
+    />
+  );
+}
+
 function LiveSessionChart({
   data,
+  onClear,
 }: {
   data: Array<{ time: string; a: number | null; b: number | null }>;
+  onClear: () => void;
 }) {
   const [mode, setMode] = React.useState<SessionMode>("pnl");
+  const [timeWindow, setTimeWindow] = React.useState<WindowKey>("all");
+
+  // Slice data to the active time window before computing chart values.
+  const windowedData = React.useMemo(() => {
+    const limit = WINDOW_LIMITS[timeWindow];
+    return isFinite(limit) ? data.slice(-limit) : data;
+  }, [data, timeWindow]);
 
   // Derive chart data from the raw equity readings.
   // ALL THREE keys (a, b, spread) are always present — unused ones are null.
   // This keeps the AreaChart's child tree identical across mode switches so
   // Recharts never loses its measured dimensions.
   const chartData = React.useMemo(() => {
-    if (data.length === 0) return [];
-    return data.map((pt) => {
+    if (windowedData.length === 0) return [];
+    return windowedData.map((pt) => {
       const pnlA = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
       const pnlB = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
-      const retA = pt.a != null ? +((pt.a - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null;
-      const retB = pt.b != null ? +((pt.b - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null;
       const sp   = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
       return {
-        time: pt.time,
-        a:      mode === "pnl" ? pnlA : mode === "return" ? retA : null,
-        b:      mode === "pnl" ? pnlB : mode === "return" ? retB : null,
+        time:   pt.time,
+        a:      mode === "pnl" ? pnlA : null,
+        b:      mode === "pnl" ? pnlB : null,
         spread: mode === "spread" ? sp : null,
       };
     });
-  }, [data, mode]);
+  }, [windowedData, mode]);
+
+  // Profitability-aware fill colours — stroke stays as identity colour for A/B.
+  const lastPt = chartData.length > 0 ? chartData[chartData.length - 1] : null;
+  const aFill  = (lastPt?.a  ?? 0) >= 0 ? "hsl(142 55% 40%)" : "hsl(0 62% 52%)";
+  const bFill  = (lastPt?.b  ?? 0) >= 0 ? "hsl(213 70% 52%)" : "hsl(20 70% 50%)";
+  const sFill  = ((lastPt as { spread?: number | null } | null)?.spread ?? 0) >= 0
+    ? "hsl(38 85% 52%)" : "hsl(0 62% 52%)";
+
+  // Open / High / Low / Now stat strip
+  const stats = React.useMemo(() => {
+    type OHLC = { open: number; high: number; low: number; now: number };
+    const summarize = (vals: number[]): OHLC | null =>
+      vals.length === 0 ? null : {
+        open: vals[0],
+        high: Math.max(...vals),
+        low:  Math.min(...vals),
+        now:  vals[vals.length - 1],
+      };
+    const aVals = chartData.map((d) => d.a).filter((v): v is number => v != null);
+    const bVals = chartData.map((d) => d.b).filter((v): v is number => v != null);
+    const sVals = chartData
+      .map((d) => (d as { spread?: number | null }).spread)
+      .filter((v): v is number => v != null);
+    return { a: summarize(aVals), b: summarize(bVals), spread: summarize(sVals) };
+  }, [chartData]);
 
   // Tight Y domain — pad so tiny moves are visible
   const yDomain = React.useMemo((): [number, number] => {
@@ -1248,17 +1310,13 @@ function LiveSessionChart({
     } else {
       vals = chartData.flatMap((pt) => [pt.a, pt.b]).filter((v): v is number => v != null);
     }
-    // Sensible fallback before data arrives
     if (vals.length === 0) {
-      if (mode === "pnl") return [-100, 100];
-      if (mode === "spread") return [-50, 50];
-      return [-0.1, 0.1];
+      return mode === "spread" ? [-50, 50] : [-100, 100];
     }
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
     const range = hi - lo;
-    // Floor spread: $20 / $10 spread / 0.02% so chart isn't a flat line
-    const minSpread = mode === "pnl" ? 20 : mode === "spread" ? 10 : 0.02;
+    const minSpread = mode === "pnl" ? 20 : 10;
     const pad = Math.max(range * 0.15, minSpread / 2);
     return [lo - pad, hi + pad];
   }, [chartData, mode]);
@@ -1288,24 +1346,95 @@ function LiveSessionChart({
   // accumulate naturally as data grows instead of staying pinned at 8.
   const TICK_EVERY = 4;
 
+  const fmtPnl = (v: number) => `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`;
+
   return (
     <div className="space-y-3">
-      {/* Toggle */}
-      <div className="flex items-center gap-1 rounded-md border border-border p-0.5 w-fit">
-        {(["pnl", "return", "spread"] as SessionMode[]).map((m) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            className={`rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-              mode === m
-                ? "bg-foreground text-background"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {m === "pnl" ? "P&L Δ" : m === "return" ? "Return %" : "B−A"}
-          </button>
-        ))}
+      {/* Control bar */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Mode toggle */}
+        <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+          {(["pnl", "spread"] as SessionMode[]).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={`rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                mode === m
+                  ? "bg-foreground text-background"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {m === "pnl" ? "P&L Δ" : "B−A"}
+            </button>
+          ))}
+        </div>
+
+        {/* Time window buttons */}
+        <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+          {(["30m", "1h", "4h", "all"] as WindowKey[]).map((w) => (
+            <button
+              key={w}
+              onClick={() => setTimeWindow(w)}
+              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                timeWindow === w
+                  ? "bg-foreground text-background"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {w === "all" ? "All" : w}
+            </button>
+          ))}
+        </div>
+
+        {/* Clear session */}
+        <button
+          onClick={onClear}
+          title="Clear session data"
+          className="ml-auto rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground border border-border transition-colors"
+        >
+          ×
+        </button>
       </div>
+
+      {/* OHLC stat strip */}
+      {chartData.length >= 2 && (() => {
+        const fmtStat = (v: number) => `${v >= 0 ? "+" : ""}$${Math.abs(v).toFixed(0)}`;
+        if (mode === "spread") {
+          const s = stats.spread;
+          if (!s) return null;
+          return (
+            <div className="flex items-center gap-3 text-[10px] text-muted-foreground tabular-nums">
+              <span className="font-medium" style={{ color: "hsl(38 90% 58%)" }}>B−A</span>
+              <span>O <span className="text-foreground">{fmtStat(s.open)}</span></span>
+              <span>H <span className="text-green-500">{fmtStat(s.high)}</span></span>
+              <span>L <span className="text-red-500">{fmtStat(s.low)}</span></span>
+              <span>Now <span className={s.now >= 0 ? "text-green-500" : "text-red-500"}>{fmtStat(s.now)}</span></span>
+            </div>
+          );
+        }
+        return (
+          <div className="flex items-center gap-4 text-[10px] text-muted-foreground tabular-nums flex-wrap">
+            {stats.a && (
+              <span className="flex items-center gap-2">
+                <span className="font-medium" style={{ color: "hsl(160 60% 50%)" }}>A</span>
+                <span>O <span className="text-foreground">{fmtStat(stats.a.open)}</span></span>
+                <span>H <span className="text-green-500">{fmtStat(stats.a.high)}</span></span>
+                <span>L <span className="text-red-500">{fmtStat(stats.a.low)}</span></span>
+                <span>Now <span className={stats.a.now >= 0 ? "text-green-500" : "text-red-500"}>{fmtStat(stats.a.now)}</span></span>
+              </span>
+            )}
+            {stats.b && (
+              <span className="flex items-center gap-2">
+                <span className="font-medium" style={{ color: "hsl(213 80% 58%)" }}>B</span>
+                <span>O <span className="text-foreground">{fmtStat(stats.b.open)}</span></span>
+                <span>H <span className="text-green-500">{fmtStat(stats.b.high)}</span></span>
+                <span>L <span className="text-red-500">{fmtStat(stats.b.low)}</span></span>
+                <span>Now <span className={stats.b.now >= 0 ? "text-green-500" : "text-red-500"}>{fmtStat(stats.b.now)}</span></span>
+              </span>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Legend */}
       <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
@@ -1349,12 +1478,12 @@ function LiveSessionChart({
             <>
               {aVal != null && (
                 <span className={`ml-auto tabular-nums font-medium ${aVal >= 0 ? "text-green-500" : "text-red-500"}`}>
-                  A: {aVal >= 0 ? "+" : ""}{mode === "pnl" ? `$${Math.abs(aVal).toFixed(0)}` : `${aVal.toFixed(3)}%`}
+                  A: {aVal >= 0 ? "+" : ""}${Math.abs(aVal).toFixed(0)}
                 </span>
               )}
               {bVal != null && (
                 <span className={`tabular-nums font-medium ${bVal >= 0 ? "text-green-500" : "text-red-500"}`}>
-                  B: {bVal >= 0 ? "+" : ""}{mode === "pnl" ? `$${Math.abs(bVal).toFixed(0)}` : `${bVal.toFixed(3)}%`}
+                  B: {bVal >= 0 ? "+" : ""}${Math.abs(bVal).toFixed(0)}
                 </span>
               )}
             </>
@@ -1366,16 +1495,16 @@ function LiveSessionChart({
         <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="liveGradA" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="hsl(160 60% 50%)" stopOpacity={0.18} />
-              <stop offset="100%" stopColor="hsl(160 60% 50%)" stopOpacity={0} />
+              <stop offset="0%" stopColor={aFill} stopOpacity={0.20} />
+              <stop offset="100%" stopColor={aFill} stopOpacity={0} />
             </linearGradient>
             <linearGradient id="liveGradB" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="hsl(213 80% 58%)" stopOpacity={0.18} />
-              <stop offset="100%" stopColor="hsl(213 80% 58%)" stopOpacity={0} />
+              <stop offset="0%" stopColor={bFill} stopOpacity={0.20} />
+              <stop offset="100%" stopColor={bFill} stopOpacity={0} />
             </linearGradient>
             <linearGradient id="liveGradSpread" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="hsl(38 90% 58%)" stopOpacity={0.22} />
-              <stop offset="100%" stopColor="hsl(38 90% 58%)" stopOpacity={0} />
+              <stop offset="0%" stopColor={sFill} stopOpacity={0.24} />
+              <stop offset="100%" stopColor={sFill} stopOpacity={0} />
             </linearGradient>
           </defs>
           <XAxis
@@ -1394,11 +1523,7 @@ function LiveSessionChart({
             width={58}
             domain={yDomain}
             tick={{ fill: "var(--muted-foreground)" }}
-            tickFormatter={(v: number) =>
-              mode === "return"
-                ? `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`
-                : `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`
-            }
+            tickFormatter={(v: number) => fmtPnl(v)}
           />
           <ReferenceLine
             y={0}
@@ -1407,6 +1532,7 @@ function LiveSessionChart({
             strokeWidth={1}
           />
           <ChartTooltip
+            cursor={<ChartCrosshair />}
             content={
               <ChartTooltipContent
                 formatter={(value, name) => {
@@ -1419,13 +1545,9 @@ function LiveSessionChart({
                     );
                   }
                   const label = String(name) === "a" ? "Bot A" : "Bot B";
-                  const display =
-                    mode === "pnl"
-                      ? `${v >= 0 ? "+" : ""}$${Math.abs(v).toFixed(2)}`
-                      : `${v >= 0 ? "+" : ""}${v.toFixed(4)}%`;
                   return (
                     <span className="tabular-nums">
-                      {label}: {display}
+                      {label}: {v >= 0 ? "+" : ""}${Math.abs(v).toFixed(2)}
                     </span>
                   );
                 }}
