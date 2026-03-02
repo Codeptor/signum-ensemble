@@ -63,6 +63,9 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
   const [historyLoading, setHistoryLoading] = React.useState(false);
   const [calendarOpen, setCalendarOpen] = React.useState(false);
 
+  // Brush visible range — yDomain, stats, sessionHL derive from this slice only
+  const [brushRange, setBrushRange] = React.useState<{ start: number; end: number } | null>(null);
+
   const loadHistory = React.useCallback(async (range: DateRange) => {
     if (!range.from) return;
     const from = toYMD(range.from);
@@ -129,18 +132,32 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
     }));
   }, [windowedData, mode, showMA]);
 
+  // Keep brush viewport pinned to latest data as new points stream in
+  React.useEffect(() => {
+    if (chartData.length > 0) {
+      const start = Math.max(0, chartData.length - 240);
+      setBrushRange({ start, end: chartData.length - 1 });
+    }
+  }, [chartData.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The slice of chartData actually visible inside the Brush viewport
+  const visibleData = React.useMemo(() => {
+    if (!brushRange) return chartData;
+    return chartData.slice(brushRange.start, brushRange.end + 1);
+  }, [chartData, brushRange]);
+
   // Profitability-aware fill colours
-  const lastPt = chartData.length > 0 ? chartData[chartData.length - 1] : null;
+  const lastPt = visibleData.length > 0 ? visibleData[visibleData.length - 1] : null;
   const aFill = (lastPt?.a ?? 0) >= 0 ? CHART_COLORS.positive : CHART_COLORS.negative;
   const bFill = (lastPt?.b ?? 0) >= 0 ? CHART_COLORS.neutral : CHART_COLORS.negative;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sFill = ((lastPt as any)?.spread ?? 0) >= 0 ? CHART_COLORS.spread : CHART_COLORS.negative;
 
-  // Stats
+  // Stats — from visible data only
   const stats: SessionStats = React.useMemo(() => {
-    const aVals = chartData.map((d) => d.a).filter((v): v is number => v != null);
-    const bVals = chartData.map((d) => d.b).filter((v): v is number => v != null);
-    const sVals = chartData
+    const aVals = visibleData.map((d) => d.a).filter((v): v is number => v != null);
+    const bVals = visibleData.map((d) => d.b).filter((v): v is number => v != null);
+    const sVals = visibleData
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .map((d) => (d as any).spread)
       .filter((v): v is number => v != null);
@@ -149,9 +166,9 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
       b: summarizeOHLC(bVals),
       spread: summarizeOHLC(sVals),
     };
-  }, [chartData]);
+  }, [visibleData]);
 
-  // Session H/L for reference lines
+  // Session H/L for reference lines — from visible data only
   const sessionHigh = React.useMemo(() => {
     if (mode === "spread") return stats.spread?.high ?? null;
     const h = Math.max(stats.a?.high ?? -Infinity, stats.b?.high ?? -Infinity);
@@ -164,16 +181,16 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
     return isFinite(l) ? l : null;
   }, [mode, stats]);
 
-  // Y domain
+  // Y domain — from visible data only so Brush doesn't compress the viewport
   const yDomain: [number, number] = React.useMemo(() => {
     let vals: number[];
     if (mode === "spread") {
-      vals = chartData
+      vals = visibleData
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .map((pt) => (pt as any).spread)
         .filter((v): v is number => v != null);
     } else {
-      vals = chartData
+      vals = visibleData
         .flatMap((pt) => [pt.a, pt.b])
         .filter((v): v is number => v != null);
     }
@@ -184,7 +201,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
     const minSpread = mode === "pnl" ? 20 : 10;
     const pad = Math.max(range * 0.15, minSpread / 2);
     return [lo - pad, hi + pad];
-  }, [chartData, mode]);
+  }, [visibleData, mode]);
 
   // Jump dots (significant P&L jumps > $50)
   const jumpDots = React.useMemo(() => {
@@ -789,6 +806,11 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 tickFormatter={(v: string) =>
                   typeof v === "string" ? v.slice(0, 5) : ""
                 }
+                onChange={(range: { startIndex?: number; endIndex?: number }) => {
+                  if (range.startIndex != null && range.endIndex != null) {
+                    setBrushRange({ start: range.startIndex, end: range.endIndex });
+                  }
+                }}
               />
             </ComposedChart>
           </ChartContainer>
