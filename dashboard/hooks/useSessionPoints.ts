@@ -7,9 +7,8 @@ const STORAGE_KEY = "signum_session_equity";
 
 export interface UseSessionPointsReturn {
   points: SessionPoint[];
-  setPoints: (points: SessionPoint[]) => void;
+  setPoints: (update: SessionPoint[] | ((prev: SessionPoint[]) => SessionPoint[])) => void;
   clearPoints: () => void;
-  addPoint: (point: SessionPoint) => void;
 }
 
 export function useSessionPoints(): UseSessionPointsReturn {
@@ -50,17 +49,21 @@ export function useSessionPoints(): UseSessionPointsReturn {
     }
   }, [points]);
 
-  const setPoints = useCallback((newPoints: SessionPoint[]) => {
-    setPointsState(newPoints);
-  }, []);
+  // Accepts both direct value and functional updater
+  const setPoints = useCallback(
+    (update: SessionPoint[] | ((prev: SessionPoint[]) => SessionPoint[])) => {
+      if (typeof update === "function") {
+        setPointsState(update);
+      } else {
+        setPointsState(update);
+      }
+    },
+    []
+  );
 
   const clearPoints = useCallback(() => {
     setPointsState([]);
   }, []);
 
-  const addPoint = useCallback((point: SessionPoint) => {
-    setPointsState((prev) => [...prev, point]);
-  }, []);
-
-  return { points, setPoints, clearPoints, addPoint };
+  return { points, setPoints, clearPoints };
 }

@@ -17,21 +17,14 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { EquityPoint, EquityDisplayMode } from "@/types/dashboard";
-import { STARTING_EQUITY } from "@/lib/constants";
+import { EquityPoint, EquityDisplayMode, ChartDataPoint } from "@/types/dashboard";
+import { STARTING_EQUITY, CHART_COLORS } from "@/lib/constants";
 import { dualEquityChartConfig, extractWednesdays } from "@/lib/chart-configs";
-import { CHART_COLORS } from "@/lib/constants";
 
 interface DualEquityChartProps {
   dataA: EquityPoint[];
   dataB: EquityPoint[];
   isPaused?: boolean;
-}
-
-interface ChartDataPoint {
-  date: string;
-  botA?: number;
-  botB?: number;
 }
 
 // Custom dot component for chart
@@ -69,7 +62,7 @@ export function DualEquityChart({
 
   // Merge both series by date (last value per day wins)
   const chartData: ChartDataPoint[] = React.useMemo(() => {
-    const dateMap = new Map<string, { date: string; botA?: number; botB?: number }>();
+    const dateMap = new Map<string, ChartDataPoint>();
 
     for (const d of dataA) {
       const key = d.timestamp.slice(0, 10);

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useCallback } from "react";
-import { BotId } from "@/types/dashboard";
 
 export interface KeyboardShortcutHandlers {
   onSwitchBotA: () => void;

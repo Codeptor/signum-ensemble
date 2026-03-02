@@ -1,4 +1,4 @@
-import { BotId, StatusData, Position, RiskData, TcaData, DriftData, EquityPoint, HealthData, SessionHistoryResponse } from "./types";
+import { BotId, StatusData, Position, RiskData, TcaData, DriftData, EquityPoint, HealthData, SessionHistoryResponse } from "@/types/dashboard";
 
 const BASE = "/api/bot";
 
