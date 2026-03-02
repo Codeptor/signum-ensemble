@@ -1377,13 +1377,11 @@ const WINDOW_LIMITS: Record<WindowKey, number> = {
 const MA_WINDOW = 5;
 
 const liveChartConfig = {
-  a:         { label: "Bot A",   color: "hsl(160 60% 50%)" },
-  b:         { label: "Bot B",   color: "hsl(213 80% 58%)" },
-  pos_a:     { label: "Pos A",   color: "hsl(160 60% 50%)" },
-  pos_b:     { label: "Pos B",   color: "hsl(213 80% 58%)" },
-  ma_a:      { label: "MA A",    color: "hsl(160 60% 50%)" },
-  ma_b:      { label: "MA B",    color: "hsl(213 80% 58%)" },
-  ma_spread: { label: "MA B−A",  color: "hsl(38 90% 58%)"  },
+  a:         { label: "Bot A",  color: "hsl(160 60% 50%)" },
+  b:         { label: "Bot B",  color: "hsl(213 80% 58%)" },
+  ma_a:      { label: "MA A",   color: "hsl(160 60% 50%)" },
+  ma_b:      { label: "MA B",   color: "hsl(213 80% 58%)" },
+  ma_spread: { label: "MA B−A", color: "hsl(38 90% 58%)"  },
 } satisfies ChartConfig;
 
 // Rolling mean — requires exactly n non-null values in the window.
@@ -1499,15 +1497,11 @@ function LiveSessionChart({
       const pnlA = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
       const pnlB = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
       const sp   = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
-      const posA = (pt as { pos_a?: number | null }).pos_a ?? null;
-      const posB = (pt as { pos_b?: number | null }).pos_b ?? null;
       return {
         time:   pt.time,
         a:      mode === "pnl"    ? pnlA : null,
         b:      mode === "pnl"    ? pnlB : null,
         spread: mode === "spread" ? sp   : null,
-        pos_a:  posA,
-        pos_b:  posB,
       };
     });
     const maA = rollingMean(pts.map((p) => p.a),      MA_WINDOW);
@@ -1915,8 +1909,7 @@ function LiveSessionChart({
             tick={{ fill: "var(--muted-foreground)" }}
             tickFormatter={fmtPnl}
           />
-          {/* Hidden secondary axis for position count step lines */}
-          <YAxis yAxisId="pos" orientation="right" hide domain={["auto", "auto"]} />
+
           {/* Zero baseline */}
           <ReferenceLine yAxisId="pnl" y={0} stroke="var(--border)" strokeDasharray="3 3" strokeWidth={1} />
           {/* Session high/low — subtle guides; OHLC strip shows the values */}
@@ -1946,7 +1939,7 @@ function LiveSessionChart({
               <ChartTooltipContent
                 formatter={(value, name) => {
                   const k = String(name);
-                  if (k.startsWith("ma_") || k === "pos_a" || k === "pos_b") return null;
+                  if (k.startsWith("ma_")) return null;
                   const v = Number(value);
                   if (k === "spread")
                     return <span className="tabular-nums">B−A: {v >= 0 ? "+" : ""}${v.toFixed(2)}</span>;
@@ -1968,9 +1961,7 @@ function LiveSessionChart({
           <Line yAxisId="pnl" type="monotone" dataKey="ma_a"      stroke="hsl(160 60% 50%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
           <Line yAxisId="pnl" type="monotone" dataKey="ma_b"      stroke="hsl(213 80% 58%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
           <Line yAxisId="pnl" type="monotone" dataKey="ma_spread" stroke="hsl(38 90% 58%)"  strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
-          {/* Position count step lines — faint, secondary axis */}
-          <Line yAxisId="pos" type="stepAfter" dataKey="pos_a" stroke="hsl(160 60% 50%)" strokeWidth={1} strokeOpacity={0.30} dot={false} isAnimationActive={false} connectNulls />
-          <Line yAxisId="pos" type="stepAfter" dataKey="pos_b" stroke="hsl(213 80% 58%)" strokeWidth={1} strokeOpacity={0.30} dot={false} isAnimationActive={false} connectNulls />
+
           {/* Significant P&L jump markers */}
           {jumpDots.map((d, i) => (
             <ReferenceDot key={i} yAxisId="pnl" x={d.time} y={d.val} r={3} fill={d.color} stroke="var(--background)" strokeWidth={1} />
