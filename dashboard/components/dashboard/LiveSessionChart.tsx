@@ -66,6 +66,12 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
   // Brush visible range — yDomain, stats, sessionHL derive from this slice only
   const [brushRange, setBrushRange] = React.useState<{ start: number; end: number } | null>(null);
 
+  // Playback mode — progressive reveal of data points
+  const [playing, setPlaying] = React.useState(false);
+  const [playbackIndex, setPlaybackIndex] = React.useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = React.useState(1);
+  const playbackRef = React.useRef<NodeJS.Timeout | null>(null);
+
   const loadHistory = React.useCallback(async (range: DateRange) => {
     if (!range.from) return;
     const from = toYMD(range.from);
@@ -134,17 +140,71 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
 
   // Keep brush viewport pinned to latest data as new points stream in
   React.useEffect(() => {
-    if (chartData.length > 0) {
+    if (!playing && chartData.length > 0) {
       const start = Math.max(0, chartData.length - 240);
       setBrushRange({ start, end: chartData.length - 1 });
     }
-  }, [chartData.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [chartData.length, playing]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Playback engine ─────────────────────────────────────────────────────
+  // Base interval: one point every 50ms at 1x → 20 pts/sec feels smooth
+  const PLAYBACK_BASE_MS = 50;
+
+  React.useEffect(() => {
+    if (!playing) {
+      if (playbackRef.current) clearInterval(playbackRef.current);
+      return;
+    }
+
+    playbackRef.current = setInterval(() => {
+      setPlaybackIndex((prev) => {
+        const next = prev + 1;
+        if (next >= chartData.length) {
+          // Reached end — stop playback
+          setPlaying(false);
+          return chartData.length;
+        }
+        return next;
+      });
+    }, PLAYBACK_BASE_MS / playbackSpeed);
+
+    return () => {
+      if (playbackRef.current) clearInterval(playbackRef.current);
+    };
+  }, [playing, playbackSpeed, chartData.length]);
+
+  // Reset playback index when underlying data changes significantly (new window/mode)
+  React.useEffect(() => {
+    if (!playing) setPlaybackIndex(chartData.length);
+  }, [chartData.length, playing]);
+
+  const handlePlayback = React.useCallback(() => {
+    if (playing) {
+      // Stop
+      setPlaying(false);
+      setPlaybackIndex(chartData.length);
+    } else {
+      // Start from beginning
+      setPlaybackIndex(2); // start with 2 points so chart renders
+      setPlaying(true);
+    }
+  }, [playing, chartData.length]);
+
+  // The data the chart actually renders — clipped during playback
+  const renderData = React.useMemo(() => {
+    if (playing || playbackIndex < chartData.length) {
+      return chartData.slice(0, playbackIndex);
+    }
+    return chartData;
+  }, [chartData, playbackIndex, playing]);
 
   // The slice of chartData actually visible inside the Brush viewport
   const visibleData = React.useMemo(() => {
+    // During playback, Brush is hidden — use renderData directly
+    if (playing || playbackIndex < chartData.length) return renderData;
     if (!brushRange) return chartData;
     return chartData.slice(brushRange.start, brushRange.end + 1);
-  }, [chartData, brushRange]);
+  }, [chartData, brushRange, renderData, playing, playbackIndex]);
 
   // Profitability-aware fill colours
   const lastPt = visibleData.length > 0 ? visibleData[visibleData.length - 1] : null;
@@ -580,12 +640,12 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
               </span>
             )}
             {paused && <span className="text-yellow-400 text-[10px]">⏸ paused</span>}
-            {chartData.length > 0 && (
+            {renderData.length > 0 && (
               <>
                 {mode === "spread" ? (
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   (() => {
-                    const s = (chartData[chartData.length - 1] as any).spread;
+                    const s = (renderData[renderData.length - 1] as any).spread;
                     if (s == null) return null;
                     return (
                       <span
@@ -599,30 +659,30 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                   })()
                 ) : (
                   <>
-                    {chartData[chartData.length - 1].a != null && (
+                    {renderData[renderData.length - 1].a != null && (
                       <span
                         className={`ml-auto tabular-nums font-medium ${
-                          chartData[chartData.length - 1].a! >= 0
+                          renderData[renderData.length - 1].a! >= 0
                             ? "text-green-500"
                             : "text-red-500"
                         }`}
                       >
                         A:{" "}
-                        {chartData[chartData.length - 1].a! >= 0 ? "+" : ""}
-                        ${Math.abs(chartData[chartData.length - 1].a!).toFixed(0)}
+                        {renderData[renderData.length - 1].a! >= 0 ? "+" : ""}
+                        ${Math.abs(renderData[renderData.length - 1].a!).toFixed(0)}
                       </span>
                     )}
-                    {chartData[chartData.length - 1].b != null && (
+                    {renderData[renderData.length - 1].b != null && (
                       <span
                         className={`tabular-nums font-medium ${
-                          chartData[chartData.length - 1].b! >= 0
+                          renderData[renderData.length - 1].b! >= 0
                             ? "text-green-500"
                             : "text-red-500"
                         }`}
                       >
                         B:{" "}
-                        {chartData[chartData.length - 1].b! >= 0 ? "+" : ""}
-                        ${Math.abs(chartData[chartData.length - 1].b!).toFixed(0)}
+                        {renderData[renderData.length - 1].b! >= 0 ? "+" : ""}
+                        ${Math.abs(renderData[renderData.length - 1].b!).toFixed(0)}
                       </span>
                     )}
                   </>
@@ -631,9 +691,57 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
             )}
           </div>
 
+          {/* Playback controls */}
+          {chartData.length >= 2 && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handlePlayback}
+                title={playing ? "Stop playback" : "Replay session"}
+                className={`rounded border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  playing
+                    ? "bg-green-500/20 text-green-400 border-green-500/40"
+                    : "border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {playing ? "■ Stop" : "▶ Replay"}
+              </button>
+              {(playing || playbackIndex < chartData.length) && (
+                <>
+                  <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+                    {([1, 2, 5, 10] as const).map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => setPlaybackSpeed(s)}
+                        className={pillBtn(playbackSpeed === s)}
+                      >
+                        {s}x
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="range"
+                    min={2}
+                    max={chartData.length}
+                    value={playbackIndex}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setPlaybackIndex(val);
+                      if (val >= chartData.length) setPlaying(false);
+                    }}
+                    className="h-1 w-32 cursor-pointer accent-green-500 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:w-2.5"
+                    title={`${playbackIndex} / ${chartData.length} points`}
+                  />
+                  <span className="text-[10px] text-muted-foreground tabular-nums">
+                    {playbackIndex}/{chartData.length}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+
           <ChartContainer config={liveChartConfig} className="h-56 w-full">
             <ComposedChart
-              data={chartData}
+              data={renderData}
               margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
             >
               <defs>
@@ -723,7 +831,8 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 fill="url(#liveGradA)"
                 connectNulls
                 dot={false}
-                isAnimationActive={false}
+                isAnimationActive={playing}
+                animationDuration={playing ? 80 : 0}
               />
               <Area
                 yAxisId="pnl"
@@ -734,7 +843,8 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 fill="url(#liveGradB)"
                 connectNulls
                 dot={false}
-                isAnimationActive={false}
+                isAnimationActive={playing}
+                animationDuration={playing ? 80 : 0}
                 strokeDasharray="4 3"
               />
               <Area
@@ -746,7 +856,8 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 fill="url(#liveGradSpread)"
                 connectNulls
                 dot={false}
-                isAnimationActive={false}
+                isAnimationActive={playing}
+                animationDuration={playing ? 80 : 0}
               />
               <Line
                 yAxisId="pnl"
@@ -757,7 +868,8 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 strokeOpacity={0.7}
                 strokeDasharray="3 2"
                 dot={false}
-                isAnimationActive={false}
+                isAnimationActive={playing}
+                animationDuration={playing ? 80 : 0}
                 connectNulls
               />
               <Line
@@ -769,7 +881,8 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 strokeOpacity={0.7}
                 strokeDasharray="3 2"
                 dot={false}
-                isAnimationActive={false}
+                isAnimationActive={playing}
+                animationDuration={playing ? 80 : 0}
                 connectNulls
               />
               <Line
@@ -781,7 +894,8 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 strokeOpacity={0.7}
                 strokeDasharray="3 2"
                 dot={false}
-                isAnimationActive={false}
+                isAnimationActive={playing}
+                animationDuration={playing ? 80 : 0}
                 connectNulls
               />
               {jumpDots.map((d, i) => (
@@ -796,22 +910,24 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                   strokeWidth={1}
                 />
               ))}
-              <Brush
-                dataKey="time"
-                height={18}
-                startIndex={Math.max(0, chartData.length - 240)}
-                travellerWidth={5}
-                stroke="var(--border)"
-                fill="var(--card)"
-                tickFormatter={(v: string) =>
-                  typeof v === "string" ? v.slice(0, 5) : ""
-                }
-                onChange={(range: { startIndex?: number; endIndex?: number }) => {
-                  if (range.startIndex != null && range.endIndex != null) {
-                    setBrushRange({ start: range.startIndex, end: range.endIndex });
+              {!playing && playbackIndex >= chartData.length && (
+                <Brush
+                  dataKey="time"
+                  height={18}
+                  startIndex={Math.max(0, renderData.length - 240)}
+                  travellerWidth={5}
+                  stroke="var(--border)"
+                  fill="var(--card)"
+                  tickFormatter={(v: string) =>
+                    typeof v === "string" ? v.slice(0, 5) : ""
                   }
-                }}
-              />
+                  onChange={(range: { startIndex?: number; endIndex?: number }) => {
+                    if (range.startIndex != null && range.endIndex != null) {
+                      setBrushRange({ start: range.startIndex, end: range.endIndex });
+                    }
+                  }}
+                />
+              )}
             </ComposedChart>
           </ChartContainer>
         </div>
