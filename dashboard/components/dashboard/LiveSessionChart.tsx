@@ -190,23 +190,35 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
     }
   }, [playing, chartData.length]);
 
-  // The data the chart actually renders — clipped during playback
+  const isPlaybackActive = playing || playbackIndex < chartData.length;
+
+  // The data the chart actually renders — full length during playback,
+  // values past the cursor nulled out so the X axis stays stable and
+  // the line grows from left to right.
   const renderData = React.useMemo(() => {
-    if (playing || playbackIndex < chartData.length) {
-      return chartData.slice(0, playbackIndex);
-    }
-    return chartData;
-  }, [chartData, playbackIndex, playing]);
+    if (!isPlaybackActive) return chartData;
+    return chartData.map((pt, i) =>
+      i < playbackIndex
+        ? pt
+        : { ...pt, a: null, b: null, spread: null, ma_a: null, ma_b: null, ma_spread: null }
+    );
+  }, [chartData, playbackIndex, isPlaybackActive]);
+
+  // The revealed portion (for stats, legend, fill colors)
+  const revealedData = React.useMemo(() => {
+    if (!isPlaybackActive) return chartData;
+    return chartData.slice(0, playbackIndex);
+  }, [chartData, playbackIndex, isPlaybackActive]);
 
   // The slice of chartData actually visible inside the Brush viewport
   const visibleData = React.useMemo(() => {
-    // During playback, Brush is hidden — use renderData directly
-    if (playing || playbackIndex < chartData.length) return renderData;
+    // During playback, use revealed data for stats/legend
+    if (isPlaybackActive) return revealedData;
     if (!brushRange) return chartData;
     return chartData.slice(brushRange.start, brushRange.end + 1);
-  }, [chartData, brushRange, renderData, playing, playbackIndex]);
+  }, [chartData, brushRange, revealedData, isPlaybackActive]);
 
-  // Profitability-aware fill colours
+  // Profitability-aware fill colours (from revealed/visible data)
   const lastPt = visibleData.length > 0 ? visibleData[visibleData.length - 1] : null;
   const aFill = (lastPt?.a ?? 0) >= 0 ? CHART_COLORS.positive : CHART_COLORS.negative;
   const bFill = (lastPt?.b ?? 0) >= 0 ? CHART_COLORS.neutral : CHART_COLORS.negative;
@@ -241,16 +253,18 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
     return isFinite(l) ? l : null;
   }, [mode, stats]);
 
-  // Y domain — from visible data only so Brush doesn't compress the viewport
+  // Y domain — during playback use full chartData (stable scale);
+  // otherwise use visibleData (Brush-aware)
   const yDomain: [number, number] = React.useMemo(() => {
+    const source = isPlaybackActive ? chartData : visibleData;
     let vals: number[];
     if (mode === "spread") {
-      vals = visibleData
+      vals = source
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .map((pt) => (pt as any).spread)
         .filter((v): v is number => v != null);
     } else {
-      vals = visibleData
+      vals = source
         .flatMap((pt) => [pt.a, pt.b])
         .filter((v): v is number => v != null);
     }
@@ -261,7 +275,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
     const minSpread = mode === "pnl" ? 20 : 10;
     const pad = Math.max(range * 0.15, minSpread / 2);
     return [lo - pad, hi + pad];
-  }, [visibleData, mode]);
+  }, [visibleData, chartData, mode, isPlaybackActive]);
 
   // Jump dots (significant P&L jumps > $50)
   const jumpDots = React.useMemo(() => {
@@ -831,8 +845,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 fill="url(#liveGradA)"
                 connectNulls
                 dot={false}
-                isAnimationActive={playing}
-                animationDuration={playing ? 80 : 0}
+                isAnimationActive={false}
               />
               <Area
                 yAxisId="pnl"
@@ -843,8 +856,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 fill="url(#liveGradB)"
                 connectNulls
                 dot={false}
-                isAnimationActive={playing}
-                animationDuration={playing ? 80 : 0}
+                isAnimationActive={false}
                 strokeDasharray="4 3"
               />
               <Area
@@ -856,8 +868,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 fill="url(#liveGradSpread)"
                 connectNulls
                 dot={false}
-                isAnimationActive={playing}
-                animationDuration={playing ? 80 : 0}
+                isAnimationActive={false}
               />
               <Line
                 yAxisId="pnl"
@@ -868,8 +879,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 strokeOpacity={0.7}
                 strokeDasharray="3 2"
                 dot={false}
-                isAnimationActive={playing}
-                animationDuration={playing ? 80 : 0}
+                isAnimationActive={false}
                 connectNulls
               />
               <Line
@@ -881,8 +891,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 strokeOpacity={0.7}
                 strokeDasharray="3 2"
                 dot={false}
-                isAnimationActive={playing}
-                animationDuration={playing ? 80 : 0}
+                isAnimationActive={false}
                 connectNulls
               />
               <Line
@@ -894,8 +903,7 @@ export function LiveSessionChart({ data, onClear }: LiveSessionChartProps) {
                 strokeOpacity={0.7}
                 strokeDasharray="3 2"
                 dot={false}
-                isAnimationActive={playing}
-                animationDuration={playing ? 80 : 0}
+                isAnimationActive={false}
                 connectNulls
               />
               {jumpDots.map((d, i) => (
