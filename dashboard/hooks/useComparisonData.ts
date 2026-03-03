@@ -4,7 +4,6 @@ import { useState, useCallback, useRef } from "react";
 import { fetchStatus, fetchHealth, fetchEquity, storeSessionPoint } from "@/lib/api";
 import { StatusData, EquityPoint, SessionPoint } from "@/types/dashboard";
 import { SESSION_POINT_LIMIT } from "@/lib/constants";
-import { getMarketStatus } from "@/lib/market-utils";
 
 export interface ComparisonDataState {
   statusA: StatusData | null;
@@ -102,11 +101,6 @@ export function useComparisonData(
   // Reads from stateRef — stable reference, no state in dep array
   const accumulateSessionPoints = useCallback(
     (currentPoints: SessionPoint[]): SessionPoint[] => {
-      const market = getMarketStatus(new Date());
-      if (market.session !== "Open") {
-        return currentPoints;
-      }
-
       const { statusA, statusB } = stateRef.current;
       const eqA = statusA?.account?.equity;
       const eqB = statusB?.account?.equity;
