@@ -258,6 +258,19 @@ class DrawdownController:
             current_value=portfolio_value,
         )
 
+    def reset_peak(self, new_peak: float) -> None:
+        """Explicitly reset the equity peak to a new value.
+
+        Use after a kill-switch liquidation to prevent the controller from
+        computing drawdown against a stale high-water mark.  Without this,
+        the drawdown from the old peak persists forever (the portfolio can
+        never grow back to the old peak when it's 100% cash), trapping the
+        bot in an infinite kill-switch loop.
+        """
+        self._peak = new_peak
+        self._is_deleveraging = False
+        logger.info(f"DrawdownController peak reset to ${new_peak:,.2f} (deleveraging cleared)")
+
     def adjust_weights(self, weights: dict[str, float], portfolio_value: float) -> dict[str, float]:
         """Scale weights by exposure factor."""
         state = self.update(portfolio_value)

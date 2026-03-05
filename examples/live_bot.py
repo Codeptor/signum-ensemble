@@ -210,14 +210,22 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
     submitted = []
     for pos in positions:
         try:
+            import uuid
+
             side = "sell" if pos.qty > 0 else "buy"
             qty = abs(pos.qty)
+            # LIQID fix: use a UUID-based client_order_id so every liquidation
+            # attempt is unique.  The old deterministic ID caused retries to be
+            # rejected by Alpaca ("client_order_id must be unique") because the
+            # cancelled order's ID was still remembered server-side.
+            liq_client_id = f"liq-{pos.symbol}-{uuid.uuid4().hex[:12]}"
             order = BrokerOrder(
                 symbol=pos.symbol,
                 side=side,
                 qty=qty,
                 order_type="market",
                 time_in_force="day",
+                client_order_id=liq_client_id,
             )
             order_id = broker.submit_order(order)
             submitted.append({"order_id": order_id, "symbol": pos.symbol, "qty": qty})
@@ -717,11 +725,24 @@ def run_trading_cycle(
     # doesn't breach VaR limits BEFORE submitting any orders.  This is a
     # defense-in-depth guard (risk_manager checks post-trade too) that
     # prevents the bot from even starting a rebalance into a high-risk portfolio.
+    #
+    # PREBATCH fix: exclude MAX_DRAWDOWN from this check.  Without
+    # live_equity_curve, check_portfolio_risk falls back to
+    # risk_engine.max_drawdown() which uses *historical* yfinance data.
+    # A stock's historical max drawdown (e.g. AMD at 31%) is unrelated
+    # to the live portfolio's drawdown, and was already validated in the
+    # main loop using the live DrawdownController.  Blocking trades here
+    # on historical drawdown prevents the bot from ever re-entering
+    # positions after a kill switch reset.
     if risk_manager.risk_engine is not None:
         try:
             portfolio_checks = risk_manager.check_portfolio_risk(pd.Series(target_weights))
             critical_violations = [
-                c for c in portfolio_checks if not c.passed and c.severity == "critical"
+                c
+                for c in portfolio_checks
+                if not c.passed
+                and c.severity == "critical"
+                and c.rule != "MAX_DRAWDOWN"  # Already checked in main loop
             ]
             if critical_violations:
                 violation_msgs = "; ".join(c.message for c in critical_violations)
@@ -1516,6 +1537,69 @@ def main():
                             AlertSeverity.CRITICAL,
                         )
                         _liquidate_all_positions(broker)
+
+                        # KILLRESET fix: after liquidation, reset the drawdown
+                        # controller peak and persisted equity_peak to current
+                        # broker equity. Without this, the bot loops every 30 min
+                        # computing drawdown from the old $100K peak against a
+                        # post-liquidation equity of ~$68-75K — forever.
+                        try:
+                            post_liq_account = broker.get_account()
+                            post_liq_equity = post_liq_account.equity
+
+                            # Reset the DrawdownController high-water mark
+                            risk_manager.drawdown_controller.reset_peak(post_liq_equity)
+
+                            # Reset the bridge equity curve so the old $100K
+                            # initial point doesn't pollute future drawdown calcs
+                            bridge.equity_curve.clear()
+                            bridge.equity_curve.append(
+                                {
+                                    "timestamp": datetime.now(tz=ZoneInfo("America/New_York")),
+                                    "equity": post_liq_equity,
+                                }
+                            )
+                            bridge.equity = post_liq_equity
+                            bridge.cash = post_liq_account.cash
+
+                            # Persist the new peak so it survives restarts
+                            _save_bot_state(
+                                {
+                                    "last_trade_date": datetime.now(
+                                        tz=ZoneInfo("America/New_York")
+                                    ).isoformat(),
+                                    "last_equity": post_liq_equity,
+                                    "equity_peak": post_liq_equity,
+                                    "kill_switch_fired": True,
+                                    "kill_switch_time": datetime.now(
+                                        tz=ZoneInfo("America/New_York")
+                                    ).isoformat(),
+                                }
+                            )
+                            _append_equity_history(post_liq_equity)
+
+                            # Check if any positions remain (stuck orders)
+                            remaining = broker.list_positions()
+                            if remaining:
+                                stuck = [p.symbol for p in remaining]
+                                logger.warning(
+                                    f"Post-liquidation: {len(remaining)} positions "
+                                    f"still open: {stuck}. Manual intervention needed."
+                                )
+                                _send_alert(
+                                    f"Kill switch fired but {len(remaining)} positions "
+                                    f"remain: {stuck}. Manual close required.",
+                                    AlertSeverity.CRITICAL,
+                                )
+                            else:
+                                logger.info(
+                                    "Post-liquidation: all positions closed. "
+                                    f"Equity: ${post_liq_equity:,.2f}. "
+                                    "Peak reset — bot can resume trading next cycle."
+                                )
+                        except Exception as e:
+                            logger.error(f"Post-liquidation state reset failed: {e}")
+
                         time.sleep(60 * 30)
                         continue
 
