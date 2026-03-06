@@ -1394,7 +1394,12 @@ def main():
     # Check if we've already traded today (duplicate execution guard - P0-5)
     # C-STARTUP fix: only exit on non-rebalance days if we've done entry trades.
     # GTC SL/TP fills on non-rebalance days should not cause early exit.
-    if should_rebalance_today() and _has_traded_today(broker):
+    # SKIP_TRADE_GUARD=1 in .env bypasses this for manual restarts after liquidation.
+    if (
+        not os.environ.get("SKIP_TRADE_GUARD")
+        and should_rebalance_today()
+        and _has_traded_today(broker)
+    ):
         logger.info("Already traded today. Exiting to prevent duplicate execution.")
         broker.disconnect()
         sys.exit(0)
@@ -1471,7 +1476,7 @@ def main():
                     continue
 
                 # Check if already traded today (duplicate execution guard inside loop)
-                if _has_traded_today(broker):
+                if not os.environ.get("SKIP_TRADE_GUARD") and _has_traded_today(broker):
                     logger.info("Already traded today. Skipping cycle.")
                     time.sleep(60 * 60 * 4)  # Sleep 4 hours
                     continue

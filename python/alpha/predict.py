@@ -50,11 +50,12 @@ from python.portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
 
-# Minimum history needed for feature computation (60-day MA + 20-day rolling).
-# H-HRP fix: increased from 6mo to 1y.  HRP on 6 months of 10-stock data
-# produces noisy correlation estimates; 1 year provides ~252 observations
-# which is sufficient for stable hierarchical clustering.
-MIN_HISTORY_DAYS = "1y"
+# Minimum history needed for feature computation.
+# M-MOM fix: increased from 1y to 2y.  mom_12_1 (Jegadeesh-Titman momentum)
+# requires pct_change(252) which needs 253+ rows.  With period="1y" Yahoo
+# returns exactly 252 rows, making mom_12_1 100% NaN at inference time.
+# 2y provides ample buffer for all lookback windows.
+MIN_HISTORY_DAYS = "2y"
 
 # Training lookback — how much S&P 500 history to train the model on.
 # H-SURV fix: reduced from 5y to 2y.  With 5y lookback using *current*
