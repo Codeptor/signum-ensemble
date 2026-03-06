@@ -115,15 +115,14 @@ class PortfolioOptimizer:
     def _prior_estimator(self):
         """Return an EmpiricalPrior with Ledoit-Wolf covariance if available (R3-O-1).
 
-        Creates a fresh LedoitWolf instance each time instead of reusing the
-        pre-fitted one, so skfolio's internal fit() produces correct results
-        regardless of version-specific assumptions about estimator state.
+        Uses skfolio's own LedoitWolf (inherits BaseCovariance) — NOT sklearn's,
+        which causes TypeError in skfolio v0.15+.
         """
         if self._shrunk:
             try:
-                from sklearn.covariance import LedoitWolf
+                from skfolio.moments.covariance import LedoitWolf as SkfolioLW
 
-                return EmpiricalPrior(covariance_estimator=LedoitWolf())
+                return EmpiricalPrior(covariance_estimator=SkfolioLW())
             except Exception as e:
                 logger.warning(f"Could not create shrunk prior: {e}")
         return EmpiricalPrior()

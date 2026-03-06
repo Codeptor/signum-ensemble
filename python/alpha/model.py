@@ -34,7 +34,7 @@ class CrossSectionalModel:
                 "metric": "huber",
                 "learning_rate": 0.05,
                 "num_leaves": 31,
-                "min_child_samples": 250,
+                "min_child_samples": 50,
                 "subsample": 0.7,
                 "colsample_bytree": 0.7,
                 "verbose": -1,
@@ -87,7 +87,7 @@ class CrossSectionalModel:
                     # converged on noisy cross-sectional equity targets.
                     # Increased to 50 to allow more patience.
                     fit_kwargs["callbacks"] = [
-                        lgb.early_stopping(stopping_rounds=50, verbose=True),
+                        lgb.early_stopping(stopping_rounds=20, verbose=True),
                         lgb.log_evaluation(period=50),
                     ]
 

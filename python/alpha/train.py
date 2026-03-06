@@ -46,18 +46,19 @@ FEATURE_COLS = [
     "ret_5d",
     "ret_20d",
     "mom_12_1",
-    # Mean reversion (3) — RSI, Bollinger, z-score
+    # Mean reversion (2) — RSI + Bollinger
     "rsi_14",
     "bb_position",
-    "mr_zscore_60",
     # Volatility (2) — close-to-close + Yang-Zhang (OHLC, 8x more efficient)
     "vol_20d",
     "vol_yz_20d",
-    # Volume (1) — confirm momentum with volume
-    "volume_ratio",
     # Cross-sectional (2) — relative strength + sector-relative momentum
     "cs_ret_rank_5d",
     "sector_rel_mom",
+    # Macro regime (2) — VIX ratio + term spread give the model regime context
+    # so it can learn that momentum works in low-vol and reversion in high-vol
+    "vix_ma_ratio",
+    "term_spread",
 ]
 
 # Full feature set preserved for comparison / ablation studies

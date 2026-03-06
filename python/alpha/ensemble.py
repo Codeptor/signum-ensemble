@@ -114,9 +114,9 @@ class ModelEnsemble:
             loss_function="Huber:delta=1.0",
         )
         self.rf = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_leaf=100,
+            n_estimators=200,
+            max_depth=12,
+            min_samples_leaf=20,
             n_jobs=-1,
             random_state=DEFAULT_SEED,
         )

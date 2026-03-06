@@ -209,7 +209,8 @@ def run_backtest(
         featured = merge_macro_features(featured, macro_path=macro_path)
     labeled = compute_forward_returns(featured, horizon=rebalance_days)
     labeled = compute_residual_target(labeled, horizon=rebalance_days)
-    labeled = labeled.dropna(subset=FEATURE_COLS + [f"target_{rebalance_days}d"])
+    available_features = [c for c in FEATURE_COLS if c in labeled.columns]
+    labeled = labeled.dropna(subset=available_features + [f"target_{rebalance_days}d"])
 
     all_returns = []
     weight_history = []
@@ -236,7 +237,7 @@ def run_backtest(
         train = labeled.iloc[train_idx]
         test = labeled.iloc[test_idx]
 
-        model = CrossSectionalModel(model_type="lightgbm", feature_cols=FEATURE_COLS)
+        model = CrossSectionalModel(model_type="lightgbm", feature_cols=available_features)
         model.fit(train, target_col=f"target_{rebalance_days}d")
 
         preds = model.predict(test)

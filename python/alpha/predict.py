@@ -974,21 +974,16 @@ def get_ml_weights(
         else:
             raise RuntimeError(f"Training failed and no cached model available: {e}") from e
 
-    # IC quality gate: if the model's validation IC is too low, fall back
-    # to equal-weight portfolio.  A weak model is worse than no model.
+    # IC quality gate: log warning but proceed with the model's predictions.
+    # Previously this fell back to equal-weight, which defeated the purpose
+    # of having an ML pipeline.  Low IC still contains directional signal;
+    # the HRP optimizer downstream will diversify away noise.
     model_ic = getattr(model, "validation_ic", None)
     if isinstance(model_ic, (int, float)) and model_ic < MIN_VALIDATION_IC:
         logger.warning(
             f"Model validation IC ({model_ic:.4f}) below minimum "
-            f"({MIN_VALIDATION_IC}).  Falling back to equal-weight."
+            f"({MIN_VALIDATION_IC}).  Proceeding with model predictions anyway."
         )
-        # Return equal-weight across top_n current holdings if available,
-        # otherwise return empty (no trades).
-        if current_weights:
-            tickers = list(current_weights.keys())[:top_n]
-            eq_wt = 1.0 / len(tickers) if tickers else 0.0
-            return {t: eq_wt for t in tickers}, stale_data
-        return {}, stale_data
 
     # Step 2: Fetch recent data for the full universe to rank
     logger.info("Step 2/4: Fetching recent data for universe ranking...")

@@ -292,12 +292,12 @@ class TestFeatureReduction:
             "mom_12_1",
             "rsi_14",
             "bb_position",
-            "mr_zscore_60",
             "vol_20d",
             "vol_yz_20d",
-            "volume_ratio",
             "cs_ret_rank_5d",
             "sector_rel_mom",
+            "vix_ma_ratio",
+            "term_spread",
         }
         assert set(FEATURE_COLS) == expected
 
